@@ -1,17 +1,23 @@
 from netmiko import ConnectHandler
 
-# Connexion à un équipement Cisco via SSH
-cisco_01 = {
-    "device_type": "cisco_ios_telnet",
-    "host": "127.0.0.1",
-    "port": 5000,
-    "username": "admin",
-    "password": "cisco",
-    "secret": "cisco"
-}
+# Connexion à plusieurs équipements Cisco via SSH
+devices = [
+    {"name": "R1", "port": 5000},
+    {"name": "R2", "port": 5001},
+    {"name": "R3", "port": 5002},
+]
 
-connection = ConnectHandler(**cisco_01)
-connection.enable()
-output = connection.send_command("show run | inc hostname")
-print(output)
-connection.disconnect()
+for d in devices:
+    device = {
+        "device_type": "cisco_ios_telnet",
+        "host": "127.0.0.1",
+        "port": d["port"],
+        "username": "admin",
+        "password": "cisco",
+        "secret": "cisco"
+    }
+    connection = ConnectHandler(**device)
+    connection.enable()
+    output = connection.send_command("show run | inc hostname")
+    print(f"{d['name']} → {output}")
+    connection.disconnect()
