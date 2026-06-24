@@ -1,6 +1,14 @@
 from netmiko import ConnectHandler
 
-# Connexion à plusieurs équipements Cisco via SSH
+# Commandes de configuration à envoyer
+commands = [
+    "logging buffered 10000",
+    "no ip http server",
+    "service timestamps log datetime msec",
+    "ntp server 8.8.8.8"
+]
+
+# Liste des équipements
 devices = [
     {"name": "R1", "port": 5000},
     {"name": "R2", "port": 5001},
@@ -18,6 +26,9 @@ for d in devices:
     }
     connection = ConnectHandler(**device)
     connection.enable()
-    output = connection.send_command("show run | inc hostname")
-    print(f"{d['name']} → {output}")
+    connection.send_config_set(commands)
+    connection.save_config()
+    print(f"✓ {d['name']} — configuration appliquée")
     connection.disconnect()
+
+print("\nTerminé — config envoyée sur tous les équipements")

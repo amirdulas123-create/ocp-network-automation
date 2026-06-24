@@ -17,6 +17,13 @@ Connexion simultanée à R1, R2 et R3 — récupération du hostname de chaque �
 ![v0.2 CMD](docs/screenshots/screenshot_v02_cmd.png)
 ![v0.2 GNS3](docs/screenshots/screenshot_v02_gns3.png)
 
+### v0.3 — 24 juin 2026 — Envoi de configuration groupée
+Envoi de commandes de configuration sur R1, R2 et R3 simultanément via SSH.
+Vérification appliquée directement sur les équipements.
+
+![v0.3 CMD](docs/screenshots/screenshot_v03_cmd.png)
+![v0.3 GNS3](docs/screenshots/screenshot_v03_gns3.png)
+
 ---
 
 ## Installation
