@@ -1,4 +1,6 @@
 import openpyxl
+import os
+from datetime import datetime
 from netmiko import ConnectHandler
 
 # Chargement des équipements depuis Excel
@@ -7,12 +9,10 @@ ws = wb.active
 headers = [cell.value for cell in ws[1]]
 devices = [dict(zip(headers, row)) for row in ws.iter_rows(min_row=2, values_only=True)]
 
-commands = [
-    "logging buffered 10000",
-    "no ip http server",
-    "service timestamps log datetime msec",
-    "ntp server 8.8.8.8"
-]
+# Dossier de sauvegarde horodaté
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+backup_dir = os.path.join("backups", timestamp)
+os.makedirs(backup_dir, exist_ok=True)
 
 for d in devices:
     conn = ConnectHandler(
@@ -24,9 +24,12 @@ for d in devices:
         secret=d["secret"]
     )
     conn.enable()
-    conn.send_config_set(commands)
-    conn.save_config()
-    print(f"✓ {d['name']} — config appliquée")
+    output = conn.send_command("show running-config")
     conn.disconnect()
 
-print("\nTerminé")
+    filename = os.path.join(backup_dir, f"{d['name']}_{timestamp}.txt")
+    with open(filename, "w") as f:
+        f.write(output)
+    print(f"✓ {d['name']} — sauvegarde : {filename}")
+
+print("\nTerminé — toutes les configs sauvegardées")

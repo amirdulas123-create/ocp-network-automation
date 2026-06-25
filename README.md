@@ -30,6 +30,13 @@ Plus besoin de modifier le code pour ajouter un équipement.
 
 ![v0.4 CMD](docs/screenshots/screenshot_v04_cmd.png)
 ![v0.4 Excel](docs/screenshots/screenshot_v04_excel.png)
+
+### v0.5 — 25 juin 2026 — Sauvegarde automatique des configurations
+Sauvegarde automatique de la running-config de chaque équipement dans des fichiers horodatés.
+
+![v0.5 CMD](docs/screenshots/screenshot_v05_cmd.png)
+![v0.5 Files](docs/screenshots/screenshot_v05_files.png)
+
 ---
 
 ## Installation
