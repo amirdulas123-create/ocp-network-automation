@@ -24,6 +24,12 @@ Vérification appliquée directement sur les équipements.
 ![v0.3 CMD](docs/screenshots/screenshot_v03_cmd.png)
 ![v0.3 GNS3](docs/screenshots/screenshot_v03_gns3.png)
 
+### v0.4 — 25 juin 2026 — Chargement des équipements depuis Excel
+Import automatique de la liste des équipements depuis un fichier Excel (devices.xlsx).
+Plus besoin de modifier le code pour ajouter un équipement.
+
+![v0.4 CMD](docs/screenshots/screenshot_v04_cmd.png)
+![v0.4 Excel](docs/screenshots/screenshot_v04_excel.png)
 ---
 
 ## Installation
