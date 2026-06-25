@@ -1,12 +1,13 @@
-import tkinter as tk
-from tkinter import scrolledtext
-from PIL import Image, ImageTk
+import customtkinter as ctk
+import threading
 import openpyxl
 import os
 from datetime import datetime
 from netmiko import ConnectHandler
-import ctypes
-ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("OCP.NetworkAutomation")
+from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
 def load_devices():
     wb = openpyxl.load_workbook("devices.xlsx")
@@ -14,65 +15,103 @@ def load_devices():
     headers = [cell.value for cell in ws[1]]
     return [dict(zip(headers, row)) for row in ws.iter_rows(min_row=2, values_only=True)]
 
-def push_config():
-    log.insert(tk.END, "Envoi config...\n")
-    devices = load_devices()
-    commands = ["logging buffered 10000", "no ip http server",
-                "service timestamps log datetime msec", "ntp server 8.8.8.8"]
-    for d in devices:
-        try:
-            conn = ConnectHandler(
-                device_type=d["device_type"], host=d["host"],
-                port=int(d["port"]), username=d["username"],
-                password=d["password"], secret=d["secret"]
-            )
-            conn.enable()
-            conn.send_config_set(commands)
-            conn.save_config()
-            conn.disconnect()
-            log.insert(tk.END, f"✓ {d['name']} — config appliquée\n")
-        except Exception as e:
-            log.insert(tk.END, f"✗ {d['name']} — erreur: {e}\n")
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("OCP Network Automation")
+        self.geometry("900x600")
+        self.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "ocp_logo.ico"))
+        self._build()
 
-def backup():
-    log.insert(tk.END, "Sauvegarde...\n")
-    devices = load_devices()
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    backup_dir = os.path.join("backups", timestamp)
-    os.makedirs(backup_dir, exist_ok=True)
-    for d in devices:
-        try:
-            conn = ConnectHandler(
-                device_type=d["device_type"], host=d["host"],
-                port=int(d["port"]), username=d["username"],
-                password=d["password"], secret=d["secret"]
-            )
-            conn.enable()
-            output = conn.send_command("show running-config")
-            conn.disconnect()
-            filename = os.path.join(backup_dir, f"{d['name']}_{timestamp}.txt")
-            with open(filename, "w") as f:
-                f.write(output)
-            log.insert(tk.END, f"✓ {d['name']} — sauvegardé\n")
-        except Exception as e:
-            log.insert(tk.END, f"✗ {d['name']} — erreur: {e}\n")
+    def _build(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        tabs = ctk.CTkTabview(self, anchor="nw")
+        tabs.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+        tabs.add("Envoi Config")
+        tabs.add("Sauvegarde")
+        self._build_push(tabs.tab("Envoi Config"))
+        self._build_backup(tabs.tab("Sauvegarde"))
 
-# Interface
-root = tk.Tk()
-root.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "ocp_logo.ico"))
-root.title("OCP Network Automation")
-root.geometry("600x450")
+    def _build_push(self, frame):
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(1, weight=1)
+        ctk.CTkButton(frame, text="Envoyer config a tous les appareils",
+                      fg_color="#1d4ed8", hover_color="#1e40af",
+                      command=lambda: threading.Thread(target=self._run_push, daemon=True).start()
+                      ).grid(row=0, column=0, pady=10, sticky="w")
+        self._push_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
+        self._push_log.grid(row=1, column=0, sticky="nsew")
 
-# Icon taskbar
-root.iconbitmap("assets/ocp_logo.ico")
+    def _build_backup(self, frame):
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(1, weight=1)
+        ctk.CTkButton(frame, text="Sauvegarder tous les appareils",
+                      fg_color="#15803d", hover_color="#166534",
+                      command=lambda: threading.Thread(target=self._run_backup, daemon=True).start()
+                      ).grid(row=0, column=0, pady=10, sticky="w")
+        self._backup_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
+        self._backup_log.grid(row=1, column=0, sticky="nsew")
 
-# Boutons
-btn_frame = tk.Frame(root)
-btn_frame.pack(pady=10)
-tk.Button(btn_frame, text="Envoyer Config", command=push_config, bg="#1d4ed8", fg="white", width=20).pack(side="left", padx=10)
-tk.Button(btn_frame, text="Sauvegarder", command=backup, bg="#15803d", fg="white", width=20).pack(side="left", padx=10)
+    def _run_push(self):
+        box = self._push_log
+        self._clear(box)
+        devices = load_devices()
+        commands = ["logging buffered 10000", "no ip http server",
+                    "service timestamps log datetime msec", "ntp server 8.8.8.8"]
+        for d in devices:
+            self._log(box, f"Connexion a {d['name']}...")
+            try:
+                conn = ConnectHandler(
+                    device_type=d["device_type"], host=d["host"],
+                    port=int(d["port"]), username=d["username"],
+                    password=d["password"], secret=d["secret"]
+                )
+                conn.enable()
+                conn.send_config_set(commands)
+                conn.save_config()
+                conn.disconnect()
+                self._log(box, f"✓ {d['name']} — config appliquee")
+            except Exception as e:
+                self._log(box, f"✗ {d['name']} — {e}")
 
-log = scrolledtext.ScrolledText(root, height=15)
-log.pack(fill="both", expand=True, padx=10, pady=10)
+    def _run_backup(self):
+        box = self._backup_log
+        self._clear(box)
+        devices = load_devices()
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        backup_dir = os.path.join("backups", timestamp)
+        os.makedirs(backup_dir, exist_ok=True)
+        for d in devices:
+            self._log(box, f"Connexion a {d['name']}...")
+            try:
+                conn = ConnectHandler(
+                    device_type=d["device_type"], host=d["host"],
+                    port=int(d["port"]), username=d["username"],
+                    password=d["password"], secret=d["secret"]
+                )
+                conn.enable()
+                output = conn.send_command("show running-config")
+                conn.disconnect()
+                filename = os.path.join(backup_dir, f"{d['name']}_{timestamp}.txt")
+                with open(filename, "w") as f:
+                    f.write(output)
+                self._log(box, f"✓ {d['name']} — sauvegarde")
+            except Exception as e:
+                self._log(box, f"✗ {d['name']} — {e}")
 
-root.mainloop()
+    def _log(self, box, msg):
+        box.configure(state="normal")
+        box.insert("end", msg + "\n")
+        box.see("end")
+        box.configure(state="disabled")
+        box.update()
+
+    def _clear(self, box):
+        box.configure(state="normal")
+        box.delete("0.0", "end")
+        box.configure(state="disabled")
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()

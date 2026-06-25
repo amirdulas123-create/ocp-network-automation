@@ -43,6 +43,13 @@ Logo OCP intégré dans la barre de titre.
 
 ![v0.6](docs/screenshots/screenshot_v06.png)
 
+### v0.7 — 25 juin 2026 — Interface modernisée avec CustomTkinter
+Interface repensée avec CustomTkinter — thème sombre, onglets Envoi Config et Sauvegarde.
+Traitement en arrière-plan pour éviter le gel de l'interface dans les ancienne version.
+
+![v0.7 Config](docs/screenshots/screenshot_v07_config.png)
+![v0.7 Backup](docs/screenshots/screenshot_v07_backup.png)
+
 ---
 
 ## Installation
