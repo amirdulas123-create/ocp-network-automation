@@ -37,6 +37,12 @@ Sauvegarde automatique de la running-config de chaque équipement dans des fichi
 ![v0.5 CMD](docs/screenshots/screenshot_v05_cmd.png)
 ![v0.5 Files](docs/screenshots/screenshot_v05_files.png)
 
+### v0.6 — 25 juin 2026 — Première interface graphique
+Première version GUI avec Tkinter — boutons Envoyer Config et Sauvegarder avec log en temps réel.
+Logo OCP intégré dans la barre de titre.
+
+![v0.6](docs/screenshots/screenshot_v06.png)
+
 ---
 
 ## Installation
