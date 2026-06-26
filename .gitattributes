@@ -1,0 +1,4 @@
+*.md linguist-documentation=true 
+*.txt linguist-documentation=true 
+*.json linguist-documentation=true 
+*.xlsx linguist-vendored=true 

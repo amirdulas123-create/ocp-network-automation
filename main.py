@@ -2,14 +2,15 @@ import customtkinter as ctk
 import threading
 import openpyxl
 import os
+import json
 import subprocess
 import ipaddress
 from datetime import datetime
 from netmiko import ConnectHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+HISTORY_FILE = os.path.join("data", "scan_history.json")
+SETTINGS_FILE = os.path.join("data", "settings.json")
 
 def load_devices():
     wb = openpyxl.load_workbook("devices.xlsx")
@@ -20,8 +21,7 @@ def load_devices():
 def ping(ip):
     result = subprocess.run(
         ["ping", "-n", "1", "-w", "500", str(ip)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return str(ip), result.returncode == 0
 
@@ -37,19 +37,45 @@ def scan_network(subnet):
                 alive.append(ip)
     return sorted(alive)
 
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE) as f:
+            return json.load(f)
+    return []
+
+def save_history(history):
+    os.makedirs("data", exist_ok=True)
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    return {"theme": "dark"}
+
+def save_settings(settings):
+    os.makedirs("data", exist_ok=True)
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+        self.settings = load_settings()
+        ctk.set_appearance_mode(self.settings.get("theme", "dark"))
         self.title("OCP Network Automation")
-        self.geometry("900x600")
+        self.geometry("900x650")
         self.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "ocp_logo.ico"))
         self._build()
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
+
         tabs = ctk.CTkTabview(self, anchor="nw")
-        tabs.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+        tabs.grid(row=0, column=0, padx=16, pady=(16,0), sticky="nsew")
         tabs.add("Envoi Config")
         tabs.add("Sauvegarde")
         tabs.add("Scanner Réseau")
@@ -57,39 +83,123 @@ class App(ctk.CTk):
         self._build_backup(tabs.tab("Sauvegarde"))
         self._build_scanner(tabs.tab("Scanner Réseau"))
 
+        # Theme toggle button
+        theme_label = "Mode clair" if self.settings.get("theme") == "dark" else "Mode sombre"
+        self._theme_btn = ctk.CTkButton(self, text=theme_label, width=120,
+                                         fg_color="gray30", hover_color="gray40",
+                                         command=self._toggle_theme)
+        self._theme_btn.grid(row=1, column=0, padx=16, pady=8, sticky="e")
+
+    def _toggle_theme(self):
+        current = self.settings.get("theme", "dark")
+        new_theme = "light" if current == "dark" else "dark"
+        self.settings["theme"] = new_theme
+        save_settings(self.settings)
+        ctk.set_appearance_mode(new_theme)
+        self._theme_btn.configure(text="Mode clair" if new_theme == "dark" else "Mode sombre")
+
     def _build_push(self, frame):
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
-        ctk.CTkButton(frame, text="Envoyer config a tous les appareils",
+        frame.grid_rowconfigure(2, weight=1)
+
+        ctk.CTkLabel(frame, text="Envoi de Configuration Multi-Appareils",
+                     font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", pady=(5,0))
+        ctk.CTkLabel(frame, text="Tapez des commandes ou chargez un .txt — vide = commands.txt utilisé",
+                     text_color="gray").grid(row=1, column=0, sticky="w")
+
+        ctk.CTkButton(frame, text="Envoyer à tous les appareils",
                       fg_color="#1d4ed8", hover_color="#1e40af",
                       command=lambda: threading.Thread(target=self._run_push, daemon=True).start()
-                      ).grid(row=0, column=0, pady=10, sticky="w")
+                      ).grid(row=0, column=1, padx=10, pady=5, sticky="e")
+
         self._push_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
-        self._push_log.grid(row=1, column=0, sticky="nsew")
+        self._push_log.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=10)
 
     def _build_backup(self, frame):
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
+        frame.grid_rowconfigure(2, weight=1)
+
+        ctk.CTkLabel(frame, text="Sauvegarde de Configuration",
+                     font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", pady=(5,0))
+        ctk.CTkLabel(frame, text="Sauvegarde la config active de tous les appareils dans des fichiers horodatés",
+                     text_color="gray").grid(row=1, column=0, sticky="w")
+
         ctk.CTkButton(frame, text="Sauvegarder tous les appareils",
                       fg_color="#15803d", hover_color="#166534",
                       command=lambda: threading.Thread(target=self._run_backup, daemon=True).start()
-                      ).grid(row=0, column=0, pady=10, sticky="w")
+                      ).grid(row=0, column=1, padx=10, pady=5, sticky="e")
+
         self._backup_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
-        self._backup_log.grid(row=1, column=0, sticky="nsew")
+        self._backup_log.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=10)
 
     def _build_scanner(self, frame):
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(2, weight=1)
+
+        # Top row
         top = ctk.CTkFrame(frame, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew", pady=10)
-        ctk.CTkLabel(top, text="Sous-réseau (CIDR):").pack(side="left", padx=5)
+        top.grid(row=0, column=0, sticky="ew", pady=5)
+        ctk.CTkLabel(top, text="Sous-réseau :").pack(side="left", padx=5)
         self._subnet_entry = ctk.CTkEntry(top, placeholder_text="192.168.1.0/24", width=200)
         self._subnet_entry.pack(side="left", padx=5)
-        ctk.CTkButton(top, text="Scanner",
+        ctk.CTkButton(top, text="Scanner", fg_color="#dc2626", hover_color="#b91c1c",
                       command=lambda: threading.Thread(target=self._run_scan, daemon=True).start()
                       ).pack(side="left", padx=5)
-        self._scan_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
-        self._scan_log.grid(row=2, column=0, sticky="nsew")
+
+        self._scan_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11),
+                                         state="disabled", height=200)
+        self._scan_log.grid(row=2, column=0, sticky="nsew", pady=(5,0))
+
+        # History section
+        ctk.CTkLabel(frame, text="Historique des scans",
+                     font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, sticky="w", pady=(10,5))
+        self._history_frame = ctk.CTkScrollableFrame(frame, height=150)
+        self._history_frame.grid(row=4, column=0, sticky="ew")
+        self._history_frame.grid_columnconfigure(0, weight=1)
+        self._load_history_ui()
+
+    def _load_history_ui(self):
+        for widget in self._history_frame.winfo_children():
+            widget.destroy()
+        history = load_history()
+        for i, entry in enumerate(history):
+            row = ctk.CTkFrame(self._history_frame, fg_color="transparent")
+            row.grid(row=i, column=0, sticky="ew", pady=2)
+            row.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(row, text=entry["timestamp"], text_color="gray", width=160).grid(row=0, column=0, padx=5)
+            ctk.CTkLabel(row, text=entry["target"]).grid(row=0, column=1, sticky="w")
+            ctk.CTkButton(row, text="×", width=30, fg_color="transparent",
+                          hover_color="gray30",
+                          command=lambda t=entry["target"]: self._delete_history(t)
+                          ).grid(row=0, column=2, padx=5)
+
+    def _delete_history(self, target):
+        history = [h for h in load_history() if h["target"] != target]
+        save_history(history)
+        self._load_history_ui()
+
+    def _run_scan(self):
+        box = self._scan_log
+        self._clear(box)
+        subnet = self._subnet_entry.get().strip()
+        if not subnet:
+            self._log(box, "Entrez un sous-réseau valide")
+            return
+        self._log(box, f"Scan de {subnet} en cours...")
+        try:
+            alive = scan_network(subnet)
+            for ip in alive:
+                self._log(box, f"✓ {ip} — en ligne")
+            self._log(box, f"\nTotal: {len(alive)} hôtes actifs")
+
+            # Update history
+            history = load_history()
+            history = [h for h in history if h["target"] != subnet]
+            history.insert(0, {"target": subnet, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+            save_history(history)
+            self._load_history_ui()
+        except Exception as e:
+            self._log(box, f"Erreur: {e}")
 
     def _run_push(self):
         box = self._push_log
@@ -137,22 +247,6 @@ class App(ctk.CTk):
                 self._log(box, f"✓ {d['name']} — sauvegarde")
             except Exception as e:
                 self._log(box, f"✗ {d['name']} — {e}")
-
-    def _run_scan(self):
-        box = self._scan_log
-        self._clear(box)
-        subnet = self._subnet_entry.get().strip()
-        if not subnet:
-            self._log(box, "Entrez un sous-réseau valide")
-            return
-        self._log(box, f"Scan de {subnet} en cours...")
-        try:
-            alive = scan_network(subnet)
-            for ip in alive:
-                self._log(box, f"✓ {ip} — en ligne")
-            self._log(box, f"\nTotal: {len(alive)} hôtes actifs")
-        except Exception as e:
-            self._log(box, f"Erreur: {e}")
 
     def _log(self, box, msg):
         box.configure(state="normal")
