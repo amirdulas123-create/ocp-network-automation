@@ -50,6 +50,12 @@ Traitement en arrière-plan pour éviter le gel de l'interface dans les ancienne
 ![v0.7 Config](docs/screenshots/screenshot_v07_config.png)
 ![v0.7 Backup](docs/screenshots/screenshot_v07_backup.png)
 
+### v0.8 — 26 juin 2026 — Ajout onglet Scanner Réseau
+Scan de sous-réseau en parallèle (50 threads) — détecte tous les hôtes actifs en temps réel.
+Utile pour vérifier quels équipements sont en ligne avant de pousser une configuration.
+
+![v0.8 Scanner](docs/screenshots/screenshot_v08_scanner.png)
+
 ---
 
 ## Installation

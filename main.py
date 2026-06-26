@@ -2,9 +2,11 @@ import customtkinter as ctk
 import threading
 import openpyxl
 import os
+import subprocess
+import ipaddress
 from datetime import datetime
 from netmiko import ConnectHandler
-from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -14,6 +16,26 @@ def load_devices():
     ws = wb.active
     headers = [cell.value for cell in ws[1]]
     return [dict(zip(headers, row)) for row in ws.iter_rows(min_row=2, values_only=True)]
+
+def ping(ip):
+    result = subprocess.run(
+        ["ping", "-n", "1", "-w", "500", str(ip)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return str(ip), result.returncode == 0
+
+def scan_network(subnet):
+    network = ipaddress.IPv4Network(subnet, strict=False)
+    hosts = list(network.hosts())
+    alive = []
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {executor.submit(ping, ip): ip for ip in hosts}
+        for future in as_completed(futures):
+            ip, is_alive = future.result()
+            if is_alive:
+                alive.append(ip)
+    return sorted(alive)
 
 class App(ctk.CTk):
     def __init__(self):
@@ -30,8 +52,10 @@ class App(ctk.CTk):
         tabs.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
         tabs.add("Envoi Config")
         tabs.add("Sauvegarde")
+        tabs.add("Scanner Réseau")
         self._build_push(tabs.tab("Envoi Config"))
         self._build_backup(tabs.tab("Sauvegarde"))
+        self._build_scanner(tabs.tab("Scanner Réseau"))
 
     def _build_push(self, frame):
         frame.grid_columnconfigure(0, weight=1)
@@ -52,6 +76,20 @@ class App(ctk.CTk):
                       ).grid(row=0, column=0, pady=10, sticky="w")
         self._backup_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
         self._backup_log.grid(row=1, column=0, sticky="nsew")
+
+    def _build_scanner(self, frame):
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(2, weight=1)
+        top = ctk.CTkFrame(frame, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", pady=10)
+        ctk.CTkLabel(top, text="Sous-réseau (CIDR):").pack(side="left", padx=5)
+        self._subnet_entry = ctk.CTkEntry(top, placeholder_text="192.168.1.0/24", width=200)
+        self._subnet_entry.pack(side="left", padx=5)
+        ctk.CTkButton(top, text="Scanner",
+                      command=lambda: threading.Thread(target=self._run_scan, daemon=True).start()
+                      ).pack(side="left", padx=5)
+        self._scan_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
+        self._scan_log.grid(row=2, column=0, sticky="nsew")
 
     def _run_push(self):
         box = self._push_log
@@ -99,6 +137,22 @@ class App(ctk.CTk):
                 self._log(box, f"✓ {d['name']} — sauvegarde")
             except Exception as e:
                 self._log(box, f"✗ {d['name']} — {e}")
+
+    def _run_scan(self):
+        box = self._scan_log
+        self._clear(box)
+        subnet = self._subnet_entry.get().strip()
+        if not subnet:
+            self._log(box, "Entrez un sous-réseau valide")
+            return
+        self._log(box, f"Scan de {subnet} en cours...")
+        try:
+            alive = scan_network(subnet)
+            for ip in alive:
+                self._log(box, f"✓ {ip} — en ligne")
+            self._log(box, f"\nTotal: {len(alive)} hôtes actifs")
+        except Exception as e:
+            self._log(box, f"Erreur: {e}")
 
     def _log(self, box, msg):
         box.configure(state="normal")
