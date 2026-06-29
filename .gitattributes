@@ -6,3 +6,4 @@ docs/screenshots/* linguist-documentation=true
 assets/* linguist-vendored=true 
 docs/screenshots/* linguist-documentation=true 
 assets/* linguist-vendored=true 
+build/* linguist-vendored=true 
