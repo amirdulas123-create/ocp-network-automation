@@ -5,6 +5,7 @@ import os
 import json
 import subprocess
 import ipaddress
+import socket
 from datetime import datetime
 from netmiko import ConnectHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,6 +26,29 @@ def ping(ip):
     )
     return str(ip), result.returncode == 0
 
+def detect_device(ip):
+    ports = {22: "SSH", 23: "Telnet", 80: "HTTP", 443: "HTTPS", 3389: "RDP"}
+    open_ports = []
+    for port, name in ports.items():
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.3)
+            if sock.connect_ex((ip, port)) == 0:
+                open_ports.append(name)
+            sock.close()
+        except:
+            pass
+    if "SSH" in open_ports or "Telnet" in open_ports:
+        return "Equipement reseau"
+    elif "RDP" in open_ports:
+        return "PC Windows"
+    elif "HTTP" in open_ports or "HTTPS" in open_ports:
+        return "Serveur Web"
+    elif open_ports:
+        return f"Hote ({', '.join(open_ports)})"
+    else:
+        return "Hote actif"
+
 def scan_network(subnet):
     network = ipaddress.IPv4Network(subnet, strict=False)
     hosts = list(network.hosts())
@@ -34,8 +58,9 @@ def scan_network(subnet):
         for future in as_completed(futures):
             ip, is_alive = future.result()
             if is_alive:
-                alive.append(ip)
-    return sorted(alive)
+                device_type = detect_device(ip)
+                alive.append((ip, device_type))
+    return sorted(alive, key=lambda x: x[0])
 
 def load_history():
     if os.path.exists(HISTORY_FILE):
@@ -78,12 +103,11 @@ class App(ctk.CTk):
         tabs.grid(row=0, column=0, padx=16, pady=(16,0), sticky="nsew")
         tabs.add("Envoi Config")
         tabs.add("Sauvegarde")
-        tabs.add("Scanner Réseau")
+        tabs.add("Scanner Reseau")
         self._build_push(tabs.tab("Envoi Config"))
         self._build_backup(tabs.tab("Sauvegarde"))
-        self._build_scanner(tabs.tab("Scanner Réseau"))
+        self._build_scanner(tabs.tab("Scanner Reseau"))
 
-        # Theme toggle button
         theme_label = "Mode clair" if self.settings.get("theme") == "dark" else "Mode sombre"
         self._theme_btn = ctk.CTkButton(self, text=theme_label, width=120,
                                          fg_color="gray30", hover_color="gray40",
@@ -97,6 +121,7 @@ class App(ctk.CTk):
         save_settings(self.settings)
         ctk.set_appearance_mode(new_theme)
         self._theme_btn.configure(text="Mode clair" if new_theme == "dark" else "Mode sombre")
+        self.after(100, lambda: self.geometry("900x650"))
 
     def _build_push(self, frame):
         frame.grid_columnconfigure(0, weight=1)
@@ -104,10 +129,10 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(frame, text="Envoi de Configuration Multi-Appareils",
                      font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", pady=(5,0))
-        ctk.CTkLabel(frame, text="Tapez des commandes ou chargez un .txt — vide = commands.txt utilisé",
+        ctk.CTkLabel(frame, text="Les commandes du fichier commands.txt sont envoyees a tous les appareils",
                      text_color="gray").grid(row=1, column=0, sticky="w")
 
-        ctk.CTkButton(frame, text="Envoyer à tous les appareils",
+        ctk.CTkButton(frame, text="Envoyer a tous les appareils",
                       fg_color="#1d4ed8", hover_color="#1e40af",
                       command=lambda: threading.Thread(target=self._run_push, daemon=True).start()
                       ).grid(row=0, column=1, padx=10, pady=5, sticky="e")
@@ -121,7 +146,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(frame, text="Sauvegarde de Configuration",
                      font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", pady=(5,0))
-        ctk.CTkLabel(frame, text="Sauvegarde la config active de tous les appareils dans des fichiers horodatés",
+        ctk.CTkLabel(frame, text="Sauvegarde la config active de tous les appareils dans des fichiers horodates",
                      text_color="gray").grid(row=1, column=0, sticky="w")
 
         ctk.CTkButton(frame, text="Sauvegarder tous les appareils",
@@ -136,10 +161,9 @@ class App(ctk.CTk):
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(2, weight=1)
 
-        # Top row
         top = ctk.CTkFrame(frame, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", pady=5)
-        ctk.CTkLabel(top, text="Sous-réseau :").pack(side="left", padx=5)
+        ctk.CTkLabel(top, text="Sous-reseau :").pack(side="left", padx=5)
         self._subnet_entry = ctk.CTkEntry(top, placeholder_text="192.168.1.0/24", width=200)
         self._subnet_entry.pack(side="left", padx=5)
         ctk.CTkButton(top, text="Scanner", fg_color="#dc2626", hover_color="#b91c1c",
@@ -150,7 +174,6 @@ class App(ctk.CTk):
                                          state="disabled", height=200)
         self._scan_log.grid(row=2, column=0, sticky="nsew", pady=(5,0))
 
-        # History section
         ctk.CTkLabel(frame, text="Historique des scans",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, sticky="w", pady=(10,5))
         self._history_frame = ctk.CTkScrollableFrame(frame, height=150)
@@ -167,8 +190,13 @@ class App(ctk.CTk):
             row.grid(row=i, column=0, sticky="ew", pady=2)
             row.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(row, text=entry["timestamp"], text_color="gray", width=160).grid(row=0, column=0, padx=5)
-            ctk.CTkLabel(row, text=entry["target"]).grid(row=0, column=1, sticky="w")
-            ctk.CTkButton(row, text="×", width=30, fg_color="transparent",
+            lbl = ctk.CTkLabel(row, text=entry["target"], cursor="hand2")
+            lbl.grid(row=0, column=1, sticky="w")
+            lbl.bind("<Button-1>", lambda e, t=entry["target"]: (
+                self._subnet_entry.delete(0, "end"),
+                self._subnet_entry.insert(0, t)
+            ))
+            ctk.CTkButton(row, text="x", width=30, fg_color="transparent",
                           hover_color="gray30",
                           command=lambda t=entry["target"]: self._delete_history(t)
                           ).grid(row=0, column=2, padx=5)
@@ -183,16 +211,14 @@ class App(ctk.CTk):
         self._clear(box)
         subnet = self._subnet_entry.get().strip()
         if not subnet:
-            self._log(box, "Entrez un sous-réseau valide")
+            self._log(box, "Entrez un sous-reseau valide")
             return
         self._log(box, f"Scan de {subnet} en cours...")
         try:
             alive = scan_network(subnet)
-            for ip in alive:
-                self._log(box, f"✓ {ip} — en ligne")
-            self._log(box, f"\nTotal: {len(alive)} hôtes actifs")
-
-            # Update history
+            for ip, device_type in alive:
+                self._log(box, f"✓ {ip} — {device_type}")
+            self._log(box, f"\nTotal: {len(alive)} hotes actifs")
             history = load_history()
             history = [h for h in history if h["target"] != subnet]
             history.insert(0, {"target": subnet, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
@@ -213,7 +239,13 @@ class App(ctk.CTk):
                 conn = ConnectHandler(
                     device_type=d["device_type"], host=d["host"],
                     port=int(d["port"]), username=d["username"],
-                    password=d["password"], secret=d["secret"]
+                    password=d["password"], secret=d["secret"],
+                    disabled_algorithms=dict(
+                        kex=["curve25519-sha256", "curve25519-sha256@libssh.org",
+                             "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+                             "diffie-hellman-group16-sha512", "diffie-hellman-group-exchange-sha256"],
+                        pubkeys=["rsa-sha2-512", "rsa-sha2-256"]
+                    )
                 )
                 conn.enable()
                 conn.send_config_set(commands)
@@ -236,9 +268,14 @@ class App(ctk.CTk):
                 conn = ConnectHandler(
                     device_type=d["device_type"], host=d["host"],
                     port=int(d["port"]), username=d["username"],
-                    password=d["password"], secret=d["secret"]
+                    password=d["password"], secret=d["secret"],
+                    disabled_algorithms=dict(
+                        kex=["curve25519-sha256", "curve25519-sha256@libssh.org",
+                             "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+                             "diffie-hellman-group16-sha512", "diffie-hellman-group-exchange-sha256"],
+                        pubkeys=["rsa-sha2-512", "rsa-sha2-256"]
+                    )
                 )
-                conn.enable()
                 output = conn.send_command("show running-config")
                 conn.disconnect()
                 filename = os.path.join(backup_dir, f"{d['name']}_{timestamp}.txt")

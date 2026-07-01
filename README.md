@@ -56,6 +56,17 @@ Utile pour vérifier quels équipements sont en ligne avant de pousser une confi
 
 ![v0.8 Scanner](docs/screenshots/screenshot_v08_scanner.png)
 
+### v0.9 — 1 juillet 2026 — Test sur switch Cisco réel + améliorations UI
+Premier test réussi sur un vrai switch Cisco Catalyst 3750 (WS-C3750V2-24TS) en environnement LAN.
+- Ajout mode clair/sombre avec mémorisation
+- Historique des scans cliquable
+- Détection du type d'équipement (SSH/Telnet/RDP)
+- Labels descriptifs sur chaque onglet
+
+![v0.9 Config](docs/screenshots/screenshot_v09_config.png)
+![v0.9 Backup](docs/screenshots/screenshot_v09_backup.png)
+![v0.9 Scanner](docs/screenshots/screenshot_v09_scanner.png)
+
 ---
 
 ## Installation
