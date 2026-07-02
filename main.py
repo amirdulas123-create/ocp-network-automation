@@ -1,27 +1,29 @@
-import customtkinter as ctk
-import threading
-import openpyxl
+import customtkinter as ctk          # Framework GUI (Tkinter stylise, dark/light mode)
+import threading                     # Pour lancer les taches reseau sans geler l'UI
+import openpyxl                      # Lecture du fichier devices.xlsx (liste des switches)
 import os
 import json
-import subprocess
-import ipaddress
-import socket
+import subprocess                    # Utilise pour lancer la commande "ping" systeme
+import ipaddress                     # Manipulation de sous-reseaux (ex: 192.168.1.0/24)
+import socket                        # Test de ports ouverts (SSH/Telnet/HTTP/...)
 from datetime import datetime
-from netmiko import ConnectHandler
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tkinter import filedialog
+from netmiko import ConnectHandler   # Librairie pour se connecter en SSH aux switches Cisco
+from concurrent.futures import ThreadPoolExecutor, as_completed  # Scan reseau en parallele
+from tkinter import filedialog       # Boite de dialogue "Parcourir un fichier"
 
-HISTORY_FILE = os.path.join("data", "scan_history.json")
-SETTINGS_FILE = os.path.join("data", "settings.json")
-COMMANDS_FILE = "commands.txt"
+HISTORY_FILE = os.path.join("data", "scan_history.json")   # Historique des scans reseau
+SETTINGS_FILE = os.path.join("data", "settings.json")      # Preferences (theme dark/light)
+COMMANDS_FILE = "commands.txt"                              # Commandes par defaut si la zone de texte est vide
 
 def load_devices():
+    # Lit devices.xlsx : 1ere ligne = headers, chaque ligne suivante = un appareil
     wb = openpyxl.load_workbook("devices.xlsx")
     ws = wb.active
     headers = [cell.value for cell in ws[1]]
     return [dict(zip(headers, row)) for row in ws.iter_rows(min_row=2, values_only=True)]
 
 def ping(ip):
+    # Un seul ping ICMP (timeout 500ms) via la commande systeme Windows "ping"
     result = subprocess.run(
         ["ping", "-n", "1", "-w", "500", str(ip)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -29,13 +31,14 @@ def ping(ip):
     return str(ip), result.returncode == 0
 
 def detect_device(ip):
+    # Teste des ports TCP courants pour deviner le type d'appareil (pas d'auth, juste connect())
     ports = {22: "SSH", 23: "Telnet", 80: "HTTP", 443: "HTTPS", 3389: "RDP"}
     open_ports = []
     for port, name in ports.items():
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(0.3)
-            if sock.connect_ex((ip, port)) == 0:
+            if sock.connect_ex((ip, port)) == 0:  # 0 = port ouvert
                 open_ports.append(name)
             sock.close()
         except:
@@ -52,6 +55,8 @@ def detect_device(ip):
         return "Hote actif"
 
 def scan_network(subnet):
+    # Ping tous les hotes d'un sous-reseau en parallele (50 threads), puis detecte
+    # le type de chaque appareil qui repond
     network = ipaddress.IPv4Network(subnet, strict=False)
     hosts = list(network.hosts())
     alive = []
@@ -65,6 +70,7 @@ def scan_network(subnet):
     return sorted(alive, key=lambda x: x[0])
 
 def load_history():
+    # Charge l'historique des scans (liste vide si le fichier n'existe pas encore)
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE) as f:
             return json.load(f)
@@ -76,6 +82,7 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 def load_settings():
+    # Charge les preferences (theme). Dark par defaut si aucun fichier n'existe
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE) as f:
             return json.load(f)
@@ -93,11 +100,12 @@ class App(ctk.CTk):
         ctk.set_appearance_mode(self.settings.get("theme", "dark"))
         self.title("OCP Network Automation")
         self.geometry("900x700")
-        self.minsize(700, 600)
+        self.minsize(700, 600)  # empeche de redimensionner trop petit (UI cassee sinon)
         self.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "ocp_logo.ico"))
         self._build()
 
     def _build(self):
+        # Layout principal : onglets (row 0) + bouton theme en bas (row 1)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=0)
@@ -111,6 +119,7 @@ class App(ctk.CTk):
         self._build_backup(tabs.tab("Sauvegarde"))
         self._build_scanner(tabs.tab("Scanner Reseau"))
 
+        # Le texte du bouton indique l'action a venir, pas l'etat actuel
         theme_label = "Mode clair" if self.settings.get("theme") == "dark" else "Mode sombre"
         self._theme_btn = ctk.CTkButton(self, text=theme_label, width=120,
                                          fg_color="gray30", hover_color="gray40",
@@ -118,6 +127,8 @@ class App(ctk.CTk):
         self._theme_btn.grid(row=1, column=0, padx=16, pady=8, sticky="e")
 
     def _toggle_theme(self):
+        # Inverse le theme, le sauvegarde, et re-force la taille de fenetre
+        # (CustomTkinter peut redimensionner tout seul lors du changement de theme)
         current = self.settings.get("theme", "dark")
         new_theme = "light" if current == "dark" else "dark"
         self.settings["theme"] = new_theme
@@ -145,6 +156,7 @@ class App(ctk.CTk):
         btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
         ctk.CTkButton(btn_frame, text="Envoyer a tous les appareils",
                       fg_color="#1d4ed8", hover_color="#1e40af",
+                      # Thread separe pour ne pas freezer l'UI pendant les connexions SSH
                       command=lambda: threading.Thread(target=self._run_push, daemon=True).start()
                       ).pack(side="left", padx=(0,10))
         ctk.CTkButton(btn_frame, text="Parcourir .txt",
@@ -155,15 +167,16 @@ class App(ctk.CTk):
         # Commands label
         ctk.CTkLabel(frame, text="Commandes :").grid(row=2, column=0, sticky="w", pady=(5,0))
 
-        # Commands text area
+        # Commands text area (editable, une commande par ligne)
         self._commands_box = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), height=120)
         self._commands_box.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(2,5))
 
-        # Log output
+        # Log output (lecture seule, resultat de l'envoi)
         self._push_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
         self._push_log.grid(row=4, column=0, columnspan=2, sticky="nsew")
 
     def _browse_commands(self):
+        # Charge un .txt et remplace le contenu de la zone de texte des commandes
         filepath = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
         if filepath:
             with open(filepath, "r") as f:
@@ -207,12 +220,14 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(frame, text="Historique des scans",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(row=3, column=0, sticky="w", pady=(10,5))
+        # Frame scrollable : l'historique peut devenir long avec le temps
         self._history_frame = ctk.CTkScrollableFrame(frame, height=150)
         self._history_frame.grid(row=4, column=0, sticky="ew")
         self._history_frame.grid_columnconfigure(0, weight=1)
         self._load_history_ui()
 
     def _load_history_ui(self):
+        # Reconstruit l'affichage de l'historique depuis le JSON (repart de zero a chaque appel)
         for widget in self._history_frame.winfo_children():
             widget.destroy()
         history = load_history()
@@ -223,6 +238,7 @@ class App(ctk.CTk):
             ctk.CTkLabel(row, text=entry["timestamp"], text_color="gray", width=160).grid(row=0, column=0, padx=5)
             lbl = ctk.CTkLabel(row, text=entry["target"], cursor="hand2")
             lbl.grid(row=0, column=1, sticky="w")
+            # Clic sur le sous-reseau -> le remet dans le champ de saisie du scan
             lbl.bind("<Button-1>", lambda e, t=entry["target"]: (
                 self._subnet_entry.delete(0, "end"),
                 self._subnet_entry.insert(0, t)
@@ -238,6 +254,7 @@ class App(ctk.CTk):
         self._load_history_ui()
 
     def _run_scan(self):
+        # Scanne le sous-reseau saisi, affiche les resultats au fur et a mesure, sauvegarde l'historique
         box = self._scan_log
         self._clear(box)
         subnet = self._subnet_entry.get().strip()
@@ -250,6 +267,7 @@ class App(ctk.CTk):
             for ip, device_type in alive:
                 self._log(box, f"✓ {ip} — {device_type}")
             self._log(box, f"\nTotal: {len(alive)} hotes actifs")
+            # Retire l'ancienne entree du meme sous-reseau, la remet en tete avec la date du jour
             history = load_history()
             history = [h for h in history if h["target"] != subnet]
             history.insert(0, {"target": subnet, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
@@ -259,6 +277,7 @@ class App(ctk.CTk):
             self._log(box, f"Erreur: {e}")
 
     def _run_push(self):
+        # Envoie les commandes de configuration a tous les appareils de devices.xlsx
         box = self._push_log
         self._clear(box)
         devices = load_devices()
@@ -282,6 +301,7 @@ class App(ctk.CTk):
                     device_type=d["device_type"], host=d["host"],
                     port=int(d["port"]), username=d["username"],
                     password=d["password"], secret=d["secret"],
+                    # Desactive certains algos SSH modernes non supportes par les vieux Cisco
                     disabled_algorithms=dict(
                         kex=["curve25519-sha256", "curve25519-sha256@libssh.org",
                              "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
@@ -289,20 +309,22 @@ class App(ctk.CTk):
                         pubkeys=["rsa-sha2-512", "rsa-sha2-256"]
                     )
                 )
-                conn.enable()
-                conn.send_config_set(commands)
-                conn.save_config()
+                conn.enable()                     # mode privilegie
+                conn.send_config_set(commands)    # config terminal + envoi des commandes
+                conn.save_config()                # equivalent "write memory"
                 conn.disconnect()
                 self._log(box, f"✓ {d['name']} — config appliquee")
             except Exception as e:
+                # Continue sur les appareils suivants meme si celui-ci echoue
                 self._log(box, f"✗ {d['name']} — {e}")
 
     def _run_backup(self):
+        # Recupere show running-config de chaque appareil et le sauvegarde dans un fichier horodate
         box = self._backup_log
         self._clear(box)
         devices = load_devices()
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        backup_dir = os.path.join("backups", timestamp)
+        backup_dir = os.path.join("backups", timestamp)  # un dossier par session de sauvegarde
         os.makedirs(backup_dir, exist_ok=True)
         for d in devices:
             self._log(box, f"Connexion a {d['name']}...")
@@ -329,11 +351,12 @@ class App(ctk.CTk):
                 self._log(box, f"✗ {d['name']} — {e}")
 
     def _log(self, box, msg):
+        # Ecrit dans une textbox en lecture seule : deverrouille, ecrit, reverrouille, scroll bas
         box.configure(state="normal")
         box.insert("end", msg + "\n")
         box.see("end")
         box.configure(state="disabled")
-        box.update()
+        box.update()  # rafraichissement immediat, utile pendant les boucles longues
 
     def _clear(self, box):
         box.configure(state="normal")
