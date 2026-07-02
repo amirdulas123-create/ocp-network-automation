@@ -67,6 +67,22 @@ Premier test réussi sur un vrai switch Cisco Catalyst 3750 (WS-C3750V2-24TS) en
 ![v0.9 Backup](docs/screenshots/screenshot_v09_backup.png)
 ![v0.9 Scanner](docs/screenshots/screenshot_v09_scanner.png)
 
+### v1.0 — 2 juillet 2026 — Zone de texte + chargement de fichier de commandes
+
+Ajout d'une interface plus flexible pour l'envoi de configuration : possibilité de
+taper les commandes directement dans l'application ou de charger un fichier .txt
+existant, sans devoir passer uniquement par `commands.txt`.
+
+- Zone de texte editable pour taper les commandes directement dans l'UI
+- Bouton "Parcourir .txt" pour charger un fichier de commandes existant
+- Priorite automatique : zone de texte > commands.txt si la zone est vide
+- Fenetre redimensionnable avec taille minimale (UI ne casse plus en dessous d'une certaine taille)
+- Teste et valide sur switch Cisco Catalyst 3750 reel (site Jorf Lasfar) :
+  push de `service timestamps debug datetime msec localtime`, confirme via
+  `show running-config | include service timestamps` en SSH direct
+
+![v1.0 Config](docs/screenshots/screenshot_v10_config.png)
+![v1.0 Backup](docs/screenshots/screenshot_v10_backup.png)
 ---
 
 ## Installation

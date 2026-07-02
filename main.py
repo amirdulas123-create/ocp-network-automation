@@ -9,9 +9,11 @@ import socket
 from datetime import datetime
 from netmiko import ConnectHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tkinter import filedialog
 
 HISTORY_FILE = os.path.join("data", "scan_history.json")
 SETTINGS_FILE = os.path.join("data", "settings.json")
+COMMANDS_FILE = "commands.txt"
 
 def load_devices():
     wb = openpyxl.load_workbook("devices.xlsx")
@@ -90,7 +92,8 @@ class App(ctk.CTk):
         self.settings = load_settings()
         ctk.set_appearance_mode(self.settings.get("theme", "dark"))
         self.title("OCP Network Automation")
-        self.geometry("900x650")
+        self.geometry("900x700")
+        self.minsize(700, 600)
         self.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "ocp_logo.ico"))
         self._build()
 
@@ -121,24 +124,52 @@ class App(ctk.CTk):
         save_settings(self.settings)
         ctk.set_appearance_mode(new_theme)
         self._theme_btn.configure(text="Mode clair" if new_theme == "dark" else "Mode sombre")
-        self.after(100, lambda: self.geometry("900x650"))
+        self.after(200, lambda: self.geometry("900x700"))
 
     def _build_push(self, frame):
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(2, weight=1)
+        frame.grid_rowconfigure(4, weight=1)
 
-        ctk.CTkLabel(frame, text="Envoi de Configuration Multi-Appareils",
-                     font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", pady=(5,0))
-        ctk.CTkLabel(frame, text="Les commandes du fichier commands.txt sont envoyees a tous les appareils",
+        # Header
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(5,0))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text="Envoi de Configuration Multi-Appareils",
+                     font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(header, text="Tapez des commandes ou chargez un fichier .txt — vide = commands.txt utilise",
                      text_color="gray").grid(row=1, column=0, sticky="w")
 
-        ctk.CTkButton(frame, text="Envoyer a tous les appareils",
+        # Buttons row
+        btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
+        ctk.CTkButton(btn_frame, text="Envoyer a tous les appareils",
                       fg_color="#1d4ed8", hover_color="#1e40af",
                       command=lambda: threading.Thread(target=self._run_push, daemon=True).start()
-                      ).grid(row=0, column=1, padx=10, pady=5, sticky="e")
+                      ).pack(side="left", padx=(0,10))
+        ctk.CTkButton(btn_frame, text="Parcourir .txt",
+                      fg_color="gray30", hover_color="gray40",
+                      command=self._browse_commands
+                      ).pack(side="left")
 
+        # Commands label
+        ctk.CTkLabel(frame, text="Commandes :").grid(row=2, column=0, sticky="w", pady=(5,0))
+
+        # Commands text area
+        self._commands_box = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), height=120)
+        self._commands_box.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(2,5))
+
+        # Log output
         self._push_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
-        self._push_log.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=10)
+        self._push_log.grid(row=4, column=0, columnspan=2, sticky="nsew")
+
+    def _browse_commands(self):
+        filepath = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+        if filepath:
+            with open(filepath, "r") as f:
+                content = f.read()
+            self._commands_box.delete("0.0", "end")
+            self._commands_box.insert("0.0", content)
 
     def _build_backup(self, frame):
         frame.grid_columnconfigure(0, weight=1)
@@ -231,8 +262,19 @@ class App(ctk.CTk):
         box = self._push_log
         self._clear(box)
         devices = load_devices()
-        commands = ["logging buffered 10000", "no ip http server",
-                    "service timestamps log datetime msec", "ntp server 8.8.8.8"]
+
+        # Get commands from text area or fallback to commands.txt
+        text_content = self._commands_box.get("0.0", "end").strip()
+        if text_content:
+            commands = [line.strip() for line in text_content.splitlines() if line.strip()]
+        elif os.path.exists(COMMANDS_FILE):
+            with open(COMMANDS_FILE, "r") as f:
+                commands = [line.strip() for line in f if line.strip()]
+        else:
+            self._log(box, "Aucune commande trouvee — zone de texte vide et commands.txt introuvable")
+            return
+
+        self._log(box, f"Commandes a envoyer: {len(commands)}")
         for d in devices:
             self._log(box, f"Connexion a {d['name']}...")
             try:
@@ -276,12 +318,13 @@ class App(ctk.CTk):
                         pubkeys=["rsa-sha2-512", "rsa-sha2-256"]
                     )
                 )
+                conn.enable()
                 output = conn.send_command("show running-config")
                 conn.disconnect()
                 filename = os.path.join(backup_dir, f"{d['name']}_{timestamp}.txt")
                 with open(filename, "w") as f:
                     f.write(output)
-                self._log(box, f"✓ {d['name']} — sauvegarde")
+                self._log(box, f"✓ {d['name']} — sauvegarde: {filename}")
             except Exception as e:
                 self._log(box, f"✗ {d['name']} — {e}")
 

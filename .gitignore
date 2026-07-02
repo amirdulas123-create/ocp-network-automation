@@ -2,3 +2,6 @@
 build/ 
 dist/ 
 *.spec 
+devices.xlsx
+data/
+backups/
