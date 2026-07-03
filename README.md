@@ -83,6 +83,24 @@ existant, sans devoir passer uniquement par `commands.txt`.
 
 ![v1.0 Config](docs/screenshots/screenshot_v10_config.png)
 ![v1.0 Backup](docs/screenshots/screenshot_v10_backup.png)
+
+### v1.1 — 3 juillet 2026 — Corrections UX + détection d'erreurs + zoom
+
+Corrections de bugs identifies lors des tests sur switch reel, et ajout de
+controles pour rendre l'envoi de configuration plus sur.
+
+- Bouton d'arret en cours d'envoi ("Arreter l'envoi") : empeche les clics multiples
+  qui melangeaient le log de resultat
+- Fix du glitch visuel au changement de theme dark/light
+- Detection des commandes rejetees par le switch (`% Invalid input`, `% Incomplete
+  command`, etc.) au lieu d'un faux message de succes
+- Controles de zoom (+/-) : le contenu devient scrollable a tout niveau de zoom,
+  la fenetre elle-meme ne change jamais de taille
+- Correction du bouton de suppression dans l'historique du scanner, invisible en mode clair
+
+![v1.1 Arret en cours](docs/screenshots/screenshot_v11_stop_button.png)
+![v1.1 Detection erreur](docs/screenshots/screenshot_v11_error_detection.png)
+![v1.1 Zoom](docs/screenshots/screenshot_v11_zoom.png)
 ---
 
 ## Installation
