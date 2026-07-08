@@ -1,15 +1,20 @@
 import customtkinter as ctk          # Framework GUI (Tkinter stylise, dark/light mode)
 import threading                     # Pour lancer les taches reseau sans geler l'UI
-import openpyxl                      # Lecture du fichier devices.xlsx (liste des switches)
 import os
 import json
-import subprocess                    # Utilise pour lancer la commande "ping" systeme
+import re                            # Parsing des warnings/erreurs remontes par nmap
+import time                          # Chronometrage du scan (temps total)
+import shlex                         # Decoupage de la ligne de commande nmap (comme python-nmap)
+import subprocess                    # Utilise pour lancer "ping" systeme et nmap.exe
 import ipaddress                     # Manipulation de sous-reseaux (ex: 192.168.1.0/24)
 import socket                        # Test de ports ouverts (SSH/Telnet/HTTP/...)
 from datetime import datetime
-from netmiko import ConnectHandler   # Librairie pour se connecter en SSH aux switches Cisco
 from concurrent.futures import ThreadPoolExecutor, as_completed  # Scan reseau en parallele
 from tkinter import filedialog, PanedWindow  # Boite de dialogue "Parcourir un fichier" + separateur redimensionnable
+# netmiko (SSH) et openpyxl (lecture Excel) sont importes PARESSEUSEMENT au moment
+# ou on en a besoin (clic sur un bouton), pas au chargement du module : leur import
+# coute ~0.9s a eux deux et rallongeait d'autant le demarrage de l'app avant meme
+# l'affichage de la fenetre. nmap est deja importe paresseusement (voir plus bas).
 
 HISTORY_FILE = os.path.join("data", "scan_history.json")   # Historique des scans reseau
 SETTINGS_FILE = os.path.join("data", "settings.json")      # Preferences (theme dark/light)
@@ -27,6 +32,7 @@ TAB_BG = ("gray86", "gray17")
 
 def load_devices():
     # Lit devices.xlsx : 1ere ligne = headers, chaque ligne suivante = un appareil
+    import openpyxl  # import paresseux (voir en-tete) : ~0.5s, inutile au demarrage
     wb = openpyxl.load_workbook("devices.xlsx")
     ws = wb.active
     headers = [cell.value for cell in ws[1]]
@@ -64,20 +70,248 @@ def detect_device(ip):
     else:
         return "Hote actif"
 
-def scan_network(subnet):
+class ScanCancelled(Exception):
+    # Levee quand l'utilisateur demande l'arret du scan (bouton "Arreter le scan").
+    # Remonte jusqu'a _run_scan_inner qui l'affiche proprement au lieu d'un "Erreur".
+    pass
+
+
+def scan_network(subnet, cancel=None):
     # Ping tous les hotes d'un sous-reseau en parallele (50 threads), puis detecte
-    # le type de chaque appareil qui repond
+    # le type de chaque appareil qui repond. cancel (threading.Event) permet d'arreter
+    # entre deux hotes : on ne soumet plus de nouveau travail et on coupe l'attente.
     network = ipaddress.IPv4Network(subnet, strict=False)
     hosts = list(network.hosts())
     alive = []
     with ThreadPoolExecutor(max_workers=50) as executor:
         futures = {executor.submit(ping, ip): ip for ip in hosts}
         for future in as_completed(futures):
+            if cancel is not None and cancel.is_set():
+                # cancel_futures : n'attend pas les pings encore en file d'attente
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise ScanCancelled()
             ip, is_alive = future.result()
             if is_alive:
                 device_type = detect_device(ip)
                 alive.append((ip, device_type))
     return sorted(alive, key=lambda x: x[0])
+
+# ---------------------------------------------------------------------------
+# Scan avance via Nmap (python-nmap)
+# ---------------------------------------------------------------------------
+# Ports TCP scannes par defaut : les memes que l'ancien scan basique
+# (22/23/80/443/3389) + quelques ports pertinents en environnement Cisco/IT
+# (FTP, NETCONF, consoles web alternatives). Modifiable via le champ "Ports"
+# de l'onglet Scanner.
+DEFAULT_SCAN_PORTS = "21,22,23,80,443,830,3389,8080,8443"
+PORT_LABELS = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 80: "HTTP", 443: "HTTPS",
+    830: "NETCONF", 3389: "RDP", 8080: "HTTP-alt", 8443: "HTTPS-alt",
+}
+# Timeout par hote : un lab GNS3 local repond vite. 90s etait inutilement long et
+# faisait trainer le scan (3-4 min) quand quelques IPs ne repondaient pas aux
+# sondes de decouverte -> 30s suffit largement en LAN/lab.
+HOST_TIMEOUT = "30s"
+
+def _classify_device(open_ports):
+    # Meme logique de classification que detect_device() (le fallback), mais a
+    # partir des numeros de port ouverts remontes par Nmap. NETCONF (830) est
+    # ajoute comme signe d'equipement reseau (frequent sur du Cisco recent / GNS3).
+    if any(p in open_ports for p in (22, 23, 830)):
+        return "Equipement reseau"
+    if 3389 in open_ports:
+        return "PC Windows"
+    if any(p in open_ports for p in (80, 443, 8080, 8443)):
+        return "Serveur Web"
+    return "Hote actif"
+
+def _best_os_match(host_info):
+    # Renvoie la meilleure hypothese d'OS ("Linux 2.6.x (95%)") si -O a tourne,
+    # sinon None. Nmap trie osmatch par precision decroissante -> [0] = meilleur.
+    osmatch = host_info.get("osmatch", [])
+    if not osmatch:
+        return None
+    best = osmatch[0]
+    name = (best.get("name") or "").strip()
+    if not name:
+        return None
+    accuracy = best.get("accuracy", "")
+    return f"{name} ({accuracy}%)" if accuracy else name
+
+def _format_nmap_host(host_info):
+    # Construit la ligne de details d'un hote a partir des donnees Nmap, dans le
+    # meme esprit que detect_device() mais enrichi : type d'equipement, services
+    # avec produit/version (ex "SSH: OpenSSH 8.2"), et OS si disponible.
+    services = []
+    open_ports = []
+    for port in host_info.all_tcp():
+        pdata = host_info["tcp"][port]
+        if pdata.get("state") != "open":
+            continue
+        open_ports.append(port)
+        label = PORT_LABELS.get(port, pdata.get("name") or str(port))
+        product = (pdata.get("product") or "").strip()
+        version = (pdata.get("version") or "").strip()
+        if product:
+            services.append(f"{label}: {product}" + (f" {version}" if version else ""))
+        else:
+            services.append(label)
+    detail = _classify_device(open_ports)
+    if services:
+        detail += " [" + ", ".join(services) + "]"
+    os_label = _best_os_match(host_info)
+    if os_label:
+        detail += f" | OS: {os_label}"
+    return detail
+
+def _is_privilege_error(msg):
+    # La detection d'OS (-O) exige les privileges admin/root. Sans eux, Nmap
+    # s'arrete avec un message du genre "You requested a scan type which requires
+    # root privileges." que python-nmap propage en PortScannerError.
+    m = msg.lower()
+    return "privile" in m or "requires root" in m or "requested a scan type" in m
+
+def _ip_sort_key(item):
+    # Tri numerique des IP (1.2.3.10 apres 1.2.3.9, pas l'inverse lexical).
+    # Repli sur le tri texte si jamais Nmap remonte un nom d'hote.
+    try:
+        return (0, ipaddress.ip_address(item[0]))
+    except ValueError:
+        return (1, item[0])
+
+def _host_responded(host_info):
+    # En mode -Pn (aucune decouverte), Nmap marque TOUTES les IPs comme "up".
+    # Un hote reellement present repond au moins par un RST sur un port ferme (ou
+    # expose un port ouvert) ; une IP morte ne renvoie que du 'filtered' ou rien.
+    # On ne garde donc que les hotes qui ont vraiment repondu sur un port, pour ne
+    # pas lister les 254 IPs du sous-reseau.
+    for port in host_info.all_tcp():
+        if host_info["tcp"][port].get("state") in ("open", "closed"):
+            return True
+    return False
+
+def _run_nmap_process(nm, hosts, ports, arguments, cancel):
+    # Replique PortScanner.scan() (python-nmap) mais via un Popen qu'on garde la main
+    # dessus pour pouvoir le TERMINER sur demande d'annulation. nm.scan() est bloquant
+    # et non interruptible : il lance nmap.exe et attend .communicate() jusqu'a la fin,
+    # sans aucun point de controle. Ici on lance nmap.exe nous-memes (-oX - = XML sur
+    # stdout), on draine stdout/stderr dans des threads (evite l'interblocage si le
+    # buffer de pipe se remplit), et on sonde cancel toutes les 150ms pour pouvoir
+    # .terminate() nmap.exe immediatement. Le XML recolte est ensuite parse par
+    # python-nmap (analyse_nmap_xml_scan) pour rester 100% compatible avec nm[host].
+    args = ([nm._nmap_path, "-oX", "-"] + shlex.split(hosts)
+            + (["-p", ports] if ports else []) + shlex.split(arguments))
+    proc = subprocess.Popen(args, bufsize=100000, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out_holder, err_holder = {}, {}
+    t_out = threading.Thread(target=lambda: out_holder.__setitem__("v", proc.stdout.read()), daemon=True)
+    t_err = threading.Thread(target=lambda: err_holder.__setitem__("v", proc.stderr.read()), daemon=True)
+    t_out.start()
+    t_err.start()
+    while proc.poll() is None:
+        if cancel is not None and cancel.is_set():
+            proc.terminate()  # TerminateProcess sur Windows : coupe nmap.exe pour de vrai
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            break
+        time.sleep(0.15)
+    t_out.join()
+    t_err.join()
+    if cancel is not None and cancel.is_set():
+        raise ScanCancelled()
+    xml_output = out_holder.get("v", b"")
+    nmap_err = bytes.decode(err_holder.get("v", b""))
+    # Meme tri erreurs/warnings que PortScanner.scan() : un simple "Warning:" n'est pas
+    # fatal, le reste de stderr l'est (fait lever PortScannerError par analyse_nmap_xml_scan).
+    nmap_err_keep_trace, nmap_warn_keep_trace = [], []
+    if len(nmap_err) > 0:
+        regex_warning = re.compile("^Warning: .*", re.IGNORECASE)
+        for line in nmap_err.split(os.linesep):
+            if len(line) > 0:
+                if regex_warning.search(line) is not None:
+                    nmap_warn_keep_trace.append(line + os.linesep)
+                else:
+                    nmap_err_keep_trace.append(nmap_err)
+    return nm.analyse_nmap_xml_scan(nmap_xml_output=xml_output, nmap_err=nmap_err,
+                                    nmap_err_keep_trace=nmap_err_keep_trace,
+                                    nmap_warn_keep_trace=nmap_warn_keep_trace)
+
+
+def _run_nmap_scan(nm, subnet, ports, log, skip_discovery=False, cancel=None):
+    import nmap  # deja importe avec succes par l'appelant, juste pour PortScannerError
+    # Decouverte d'hote :
+    # - Par defaut, sur un LAN Ethernet, Nmap fait de l'ARP (tres fiable pour les
+    #   PC), auquel on ajoute -PE (ICMP echo request) pour les equipements qui
+    #   repondent au ping mais pas forcement aux autres sondes.
+    # - skip_discovery (-Pn) : saute completement la phase de decouverte et scanne
+    #   directement les ports. Indispensable sur certains labs GNS3 ou un routeur
+    #   virtuel repond au ping Windows manuel mais est ignore par la decouverte
+    #   Nmap (ARP/ICMP qui timeout). Sur un petit lab, scanner quelques IPs "mortes"
+    #   en plus coute bien moins cher que de rater un equipement reel.
+    discovery = "-Pn" if skip_discovery else "-PE"
+    # -T5 (au lieu de -T4) : timing le plus agressif, adapte a un lab/LAN local rapide
+    #   ou la latence est faible et la perte de paquets negligeable. --min-hostgroup 64
+    #   force Nmap a scanner les hotes par gros paquets (64 a la fois) au lieu de son
+    #   decoupage par defaut plus petit : sur un /24 (254 hotes) ca augmente nettement
+    #   le parallelisme inter-hotes et raccourcit le temps total, surtout en -Pn ou les
+    #   254 IPs sont toutes scannees. --max-retries 1 coupe les retransmissions de
+    #   sondes (inutiles en LAN) qui faisaient trainer les IPs sans reponse.
+    base_args = f"-sV -T5 --min-hostgroup 64 --max-retries 1 --host-timeout {HOST_TIMEOUT} {discovery}"
+    log(f"Decouverte d'hote : {'-Pn (aucune, scan direct des ports)' if skip_discovery else '-PE (ICMP echo) + ARP par defaut'}")
+    try:
+        _run_nmap_process(nm, subnet, ports, base_args + " -O", cancel)
+    except nmap.PortScannerError as e:
+        if _is_privilege_error(str(e)):
+            log("Detection d'OS (-O) indisponible : privileges admin/root requis.")
+            log("  -> Scan poursuivi sans detection d'OS (les versions de services restent detectees).")
+            _run_nmap_process(nm, subnet, ports, base_args, cancel)
+        else:
+            raise
+    results = []
+    for host in nm.all_hosts():
+        host_info = nm[host]
+        # En -Pn toutes les IPs sont "up" : on filtre sur une vraie reponse de port.
+        # Sinon (decouverte active), Nmap a deja valide l'etat "up" de l'hote.
+        if skip_discovery:
+            if not _host_responded(host_info):
+                continue
+        elif host_info.state() != "up":
+            continue
+        results.append((host, _format_nmap_host(host_info)))
+    found = sorted(results, key=_ip_sort_key)
+    log(f"{len(found)} hote(s) actif(s) detecte(s).")
+    if not found and not skip_discovery:
+        log("Aucun hote detecte. Si vous savez qu'un hote repond au ping, "
+            "cochez 'Sans decouverte (-Pn)' et relancez.")
+    return found
+
+def scan_network_smart(subnet, log, ports=DEFAULT_SCAN_PORTS, skip_discovery=False, cancel=None):
+    # Point d'entree du scan : tente Nmap (detection OS + versions de services) et
+    # retombe automatiquement sur scan_network() (ping + socket) si python-nmap ou
+    # le binaire nmap manque, ou si le scan Nmap echoue. log(msg) ecrit dans l'UI.
+    # cancel (threading.Event) est propage jusqu'a nmap.exe pour l'arret immediat.
+    ports = (ports or DEFAULT_SCAN_PORTS).strip() or DEFAULT_SCAN_PORTS
+    try:
+        import nmap
+    except ImportError:
+        log("Nmap non disponible (module python-nmap absent) — scan basique utilise.")
+        log("  Pour le scan avance : pip install python-nmap")
+        return scan_network(subnet, cancel=cancel)
+    try:
+        nm = nmap.PortScanner()
+    except nmap.PortScannerError:
+        log("Nmap non disponible (binaire 'nmap' introuvable) — scan basique utilise.")
+        log("  Installez Nmap : https://nmap.org/download.html puis pip install python-nmap")
+        return scan_network(subnet, cancel=cancel)
+    try:
+        log(f"Scan Nmap (-sV) des ports {ports}...")
+        return _run_nmap_scan(nm, subnet, ports, log, skip_discovery=skip_discovery, cancel=cancel)
+    except nmap.PortScannerError as e:
+        log(f"Erreur Nmap : {e}")
+        log("Repli sur le scan basique.")
+        return scan_network(subnet, cancel=cancel)
 
 def load_history():
     # Charge l'historique des scans (liste vide si le fichier n'existe pas encore)
@@ -123,6 +357,8 @@ class App(ctk.CTk):
         self._deactivate_windows_window_header_manipulation = True
         self._push_running = False
         self._push_cancel = threading.Event()
+        self._scan_running = False
+        self._scan_cancel = threading.Event()
         self.settings = load_settings()
         ctk.set_appearance_mode(self.settings.get("theme", "dark"))
         self._zoom = self.settings.get("zoom", 1.0)
@@ -130,10 +366,20 @@ class App(ctk.CTk):
         self.title("OCP Network Automation")
         self.geometry("900x700")
         self.minsize(700, 600)  # empeche de redimensionner trop petit (UI cassee sinon)
-        self.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "ocp_logo.ico"))
+        # Icone de fenetre : purement decoratif. Un .ico manquant, corrompu ou sur un
+        # chemin lent ne doit jamais empecher (ni ralentir bruyamment) le demarrage de
+        # l'app -> try/except silencieux, l'app tourne avec l'icone Tk par defaut.
+        try:
+            self.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "ocp_logo.ico"))
+        except Exception:
+            pass
         self._build()
 
     def _build(self):
+        # Police mono partagee par toutes les zones de texte (commandes/logs) : une
+        # seule CTkFont reutilisee au lieu d'en instancier une identique par textbox.
+        self._mono_font = ctk.CTkFont(family="Consolas", size=11)
+
         # Layout principal : onglets (row 0) + bouton theme en bas (row 1)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -252,12 +498,12 @@ class App(ctk.CTk):
         # Commands text area (editable, une commande par ligne)
         # bg_color=PANED_BG en tuple : la couleur derriere les coins arrondis suit le
         # theme automatiquement (voir commentaire de PANED_BG en haut du fichier)
-        self._commands_box = ctk.CTkTextbox(self._push_paned, font=ctk.CTkFont(family="Consolas", size=11),
+        self._commands_box = ctk.CTkTextbox(self._push_paned, font=self._mono_font,
                                              bg_color=PANED_BG)
         self._push_paned.add(self._commands_box, minsize=60, height=150)
 
         # Log output (lecture seule, resultat de l'envoi)
-        self._push_log = ctk.CTkTextbox(self._push_paned, font=ctk.CTkFont(family="Consolas", size=11),
+        self._push_log = ctk.CTkTextbox(self._push_paned, font=self._mono_font,
                                          state="disabled", bg_color=PANED_BG)
         self._push_paned.add(self._push_log, minsize=60, height=250)
 
@@ -287,7 +533,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(frame, text="Sauvegarde la config active de tous les appareils dans des fichiers horodates",
                      text_color="gray").grid(row=1, column=0, columnspan=2, sticky="w")
 
-        self._backup_log = ctk.CTkTextbox(frame, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
+        self._backup_log = ctk.CTkTextbox(frame, font=self._mono_font, state="disabled")
         self._backup_log.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=10)
 
     def _build_scanner(self, frame):
@@ -297,11 +543,25 @@ class App(ctk.CTk):
         top = ctk.CTkFrame(frame, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", pady=5)
         ctk.CTkLabel(top, text="Sous-reseau :").pack(side="left", padx=5)
-        self._subnet_entry = ctk.CTkEntry(top, placeholder_text="192.168.1.0/24", width=200)
+        self._subnet_entry = ctk.CTkEntry(top, placeholder_text="192.168.1.0/24", width=160)
         self._subnet_entry.pack(side="left", padx=5)
-        ctk.CTkButton(top, text="Scanner", fg_color="#dc2626", hover_color="#b91c1c",
-                      command=lambda: threading.Thread(target=self._run_scan, daemon=True).start()
-                      ).pack(side="left", padx=5)
+        # Ports optionnels : vide = DEFAULT_SCAN_PORTS. Accepte la syntaxe Nmap
+        # (ex "22,23,80" ou "1-1024"). Le placeholder montre la valeur par defaut.
+        ctk.CTkLabel(top, text="Ports :").pack(side="left", padx=(12, 5))
+        self._ports_entry = ctk.CTkEntry(top, placeholder_text=DEFAULT_SCAN_PORTS, width=180)
+        self._ports_entry.pack(side="left", padx=5)
+        # Largeur fixe : le texte passe de "Scanner" a "Scan en cours..." pendant le
+        # scan ; sans largeur fixe, le retrecissement laisse un contour fantome sur
+        # Windows (meme raison que le bouton d'envoi, voir _build_push).
+        self._scan_btn = ctk.CTkButton(top, text="Scanner", width=130,
+                                       fg_color="#dc2626", hover_color="#b91c1c",
+                                       command=self._start_scan)
+        self._scan_btn.pack(side="left", padx=5)
+        # -Pn : saute la decouverte d'hote et scanne directement les ports. A cocher
+        # quand un hote (ex routeur GNS3) repond au ping mais est ignore par la
+        # decouverte Nmap par defaut (voir _run_nmap_scan).
+        self._pn_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(top, text="Sans decouverte (-Pn)", variable=self._pn_var).pack(side="left", padx=10)
 
         # Log de scan + historique dans un PanedWindow : le sash se tire a la souris
         # pour agrandir/reduire chaque zone, au lieu d'un partage fixe qui laisse soit
@@ -311,7 +571,7 @@ class App(ctk.CTk):
                                         bg=theme_color(PANED_BG), bd=0, opaqueresize=False)
         self._scan_paned.grid(row=1, column=0, sticky="nsew", pady=(5,0))
 
-        self._scan_log = ctk.CTkTextbox(self._scan_paned, font=ctk.CTkFont(family="Consolas", size=11),
+        self._scan_log = ctk.CTkTextbox(self._scan_paned, font=self._mono_font,
                                          state="disabled", bg_color=PANED_BG)
         self._scan_paned.add(self._scan_log, minsize=60, height=200)
 
@@ -364,7 +624,32 @@ class App(ctk.CTk):
         # l'UI. On differe la reconstruction pour laisser le clic se terminer d'abord.
         self.after(0, self._load_history_ui)
 
+    def _start_scan(self):
+        # Meme pattern start/stop que _start_push : pendant un scan, un nouveau clic ne
+        # relance pas de thread (ce qui recreerait le bug des resultats dupliques) — il
+        # demande l'arret via _scan_cancel. Contrairement au push (qui boucle sur les
+        # appareils un par un), le scan Nmap est un sous-processus bloquant : on ne peut
+        # pas s'arreter "entre deux hotes". _run_nmap_process contourne ca en lancant
+        # nmap.exe lui-meme et en le TERMINANT (.terminate()) des que _scan_cancel est
+        # pose -> l'arret est reellement immediat, pas differe a la fin du scan.
+        if self._scan_running:
+            self._scan_cancel.set()
+            self._scan_btn.configure(state="disabled", text="Arret en cours...")
+            return
+        self._scan_running = True
+        self._scan_cancel.clear()
+        # Le bouton est deja rouge (#dc2626) au repos : on ne change que le texte.
+        self._scan_btn.configure(text="Arreter le scan")
+        threading.Thread(target=self._run_scan, daemon=True).start()
+
     def _run_scan(self):
+        try:
+            self._run_scan_inner()
+        finally:
+            self._scan_running = False
+            self.after(0, lambda: self._scan_btn.configure(state="normal", text="Scanner"))
+
+    def _run_scan_inner(self):
         # Scanne le sous-reseau saisi, affiche les resultats au fur et a mesure, sauvegarde l'historique
         box = self._scan_log
         self._clear(box)
@@ -373,17 +658,27 @@ class App(ctk.CTk):
             self._log(box, "Entrez un sous-reseau valide")
             return
         self._log(box, f"Scan de {subnet} en cours...")
+        t0 = time.perf_counter()
         try:
-            alive = scan_network(subnet)
+            ports = self._ports_entry.get().strip()
+            skip_discovery = bool(self._pn_var.get())
+            alive = scan_network_smart(subnet, lambda m: self._log(box, m),
+                                       ports=ports, skip_discovery=skip_discovery,
+                                       cancel=self._scan_cancel)
             for ip, device_type in alive:
                 self._log(box, f"✓ {ip} — {device_type}")
             self._log(box, f"\nTotal: {len(alive)} hotes actifs")
+            self._log(box, f"Temps total du scan : {time.perf_counter() - t0:.1f}s")
             # Retire l'ancienne entree du meme sous-reseau, la remet en tete avec la date du jour
             history = load_history()
             history = [h for h in history if h["target"] != subnet]
             history.insert(0, {"target": subnet, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
             save_history(history)
             self.after(0, self._load_history_ui)
+        except ScanCancelled:
+            # Arret demande par l'utilisateur : nmap.exe a ete termine, on n'enregistre
+            # pas ce scan partiel dans l'historique.
+            self._log(box, f"Scan annule par l'utilisateur (apres {time.perf_counter() - t0:.1f}s)")
         except Exception as e:
             self._log(box, f"Erreur: {e}")
 
@@ -411,6 +706,7 @@ class App(ctk.CTk):
 
     def _run_push_inner(self):
         # Envoie les commandes de configuration a tous les appareils de devices.xlsx
+        from netmiko import ConnectHandler  # import paresseux (voir en-tete) : ~0.4s
         box = self._push_log
         self._clear(box)
         devices = load_devices()
@@ -480,6 +776,7 @@ class App(ctk.CTk):
 
     def _run_backup(self):
         # Recupere show running-config de chaque appareil et le sauvegarde dans un fichier horodate
+        from netmiko import ConnectHandler  # import paresseux (voir en-tete) : ~0.4s
         box = self._backup_log
         self._clear(box)
         devices = load_devices()

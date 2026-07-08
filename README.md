@@ -101,6 +101,32 @@ controles pour rendre l'envoi de configuration plus sur.
 ![v1.1 Arret en cours](docs/screenshots/screenshot_v11_stop_button.png)
 ![v1.1 Detection erreur](docs/screenshots/screenshot_v11_error_detection.png)
 ![v1.1 Zoom](docs/screenshots/screenshot_v11_zoom.png)
+
+### v1.2 — 8 juillet 2026 — Scan reseau professionnel avec Nmap
+
+Remplacement du scan basique (ping + test de 5 ports en dur) par un vrai scan
+Nmap (python-nmap), avec detection de versions de services et d'OS.
+
+- Detection des versions de services (ex: "HTTP: Huawei router http admin")
+  au lieu de juste "port ouvert"
+- Detection d'OS avec pourcentage de confiance (ex: "Linux 3.18.24 (96%)")
+- Champ "Ports" configurable (syntaxe Nmap : liste ou plage), 9 ports par
+  defaut adaptes a un contexte reseau/IT (SSH, Telnet, HTTP, NETCONF, etc.)
+- Option "Sans decouverte (-Pn)" pour les hotes qui repondent au ping mais
+  sont ignores par la decouverte standard
+- Repli automatique sur le scan basique si Nmap/python-nmap est absent, avec
+  message clair a l'utilisateur
+- Bouton "Arreter le scan" : interruption reelle et immediate du scan Nmap en
+  cours (pas juste a la fin), via arret direct du sous-processus
+- Demarrage de l'application accelere (imports lourds charges a la demande
+  plutot qu'au lancement)
+- Temps total du scan affiche a la fin, pour comparaison
+
+Teste sur reseau domestique reel : 7 hotes detectes sur un /24, avec
+identification correcte du routeur (Huawei, Linux embarque, 96% de confiance).
+
+![v1.2 Scan Nmap](docs/screenshots/screenshot_v12_scan.png)
+![v1.2 Arret scan](docs/screenshots/screenshot_v12_stop.png)
 ---
 
 ## Installation
