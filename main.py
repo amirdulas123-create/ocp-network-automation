@@ -452,6 +452,19 @@ class App(ctk.CTk):
             if paned is not None:
                 paned.configure(bg=paned_bg)
 
+    def _wrap_on_resize(self, label, pad=28):
+        # Fait que le texte du label REVIENNE A LA LIGNE selon la largeur reelle
+        # disponible, au lieu d'etre tronque quand la fenetre est etroite (surtout a
+        # fort zoom). On suit le <Configure> du conteneur du label et on ajuste son
+        # wraplength (en pixels). Le garde-fou "si la valeur change vraiment" evite de
+        # reconfigurer le label a chaque pixel -> cout negligeable pendant un resize.
+        parent = label.master
+        def _update(event):
+            wl = max(120, event.width - pad)
+            if label.cget("wraplength") != wl:
+                label.configure(wraplength=wl)
+        parent.bind("<Configure>", _update, add="+")
+
     def _build_push(self, frame):
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(3, weight=1)
@@ -460,10 +473,16 @@ class App(ctk.CTk):
         header = ctk.CTkFrame(frame, fg_color="transparent")
         header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(5,10))
         header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text="Envoi de Configuration Multi-Appareils",
-                     font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(header, text="Tapez des commandes ou chargez un fichier .txt — vide = commands.txt utilise",
-                     text_color="gray").grid(row=1, column=0, sticky="w")
+        title = ctk.CTkLabel(header, text="Envoi de Configuration Multi-Appareils",
+                             font=ctk.CTkFont(size=15, weight="bold"), justify="left")
+        title.grid(row=0, column=0, sticky="w")
+        # justify="left" + wraplength responsive : le texte passe a la ligne au lieu
+        # d'etre coupe en fenetre etroite/zoomee (voir _wrap_on_resize).
+        desc = ctk.CTkLabel(header, text="Tapez des commandes ou chargez un fichier .txt — vide = commands.txt utilise",
+                            text_color="gray", justify="left")
+        desc.grid(row=1, column=0, sticky="w")
+        self._wrap_on_resize(title)
+        self._wrap_on_resize(desc)
 
         # Buttons row
         btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -503,7 +522,11 @@ class App(ctk.CTk):
         self._push_paned.add(self._commands_box, minsize=60, height=150)
 
         # Log output (lecture seule, resultat de l'envoi)
-        self._push_log = ctk.CTkTextbox(self._push_paned, font=self._mono_font,
+        # wrap="none" : pas de retour a la ligne automatique -> les lignes longues
+        # (ex erreurs Netmiko) restent sur une seule ligne. CTkTextbox affiche alors
+        # tout seul sa scrollbar horizontale interne (_x_scrollbar, gere par
+        # _check_if_scrollbars_needed) quand une ligne deborde, et la masque sinon.
+        self._push_log = ctk.CTkTextbox(self._push_paned, font=self._mono_font, wrap="none",
                                          state="disabled", bg_color=PANED_BG)
         self._push_paned.add(self._push_log, minsize=60, height=250)
 
@@ -518,50 +541,73 @@ class App(ctk.CTk):
 
     def _build_backup(self, frame):
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(2, weight=1)
+        frame.grid_rowconfigure(3, weight=1)
 
-        ctk.CTkLabel(frame, text="Sauvegarde de Configuration",
-                     font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", pady=(5,0))
+        # Titre, description et bouton chacun sur SA propre ligne (ancres a gauche) :
+        # avant, le titre et le bouton partageaient la ligne 0 et, en fenetre etroite
+        # (ou a fort zoom), le bouton sans weight prenait toute sa place et repoussait /
+        # tronquait le titre. En les empilant (comme la description l'etait deja), plus
+        # aucun element n'est en concurrence de largeur ni pousse hors de l'ecran.
+        title = ctk.CTkLabel(frame, text="Sauvegarde de Configuration",
+                             font=ctk.CTkFont(size=15, weight="bold"), justify="left")
+        title.grid(row=0, column=0, sticky="w", pady=(5,0))
+        # wraplength responsive : le texte revient a la ligne au lieu d'etre tronque
+        # en fenetre etroite/zoomee (voir _wrap_on_resize).
+        desc = ctk.CTkLabel(frame, text="Sauvegarde la config active de tous les appareils dans des fichiers horodates",
+                            text_color="gray", justify="left")
+        desc.grid(row=1, column=0, sticky="w")
+        self._wrap_on_resize(title)
+        self._wrap_on_resize(desc)
         ctk.CTkButton(frame, text="Sauvegarder tous les appareils",
                       fg_color="#15803d", hover_color="#166534",
                       command=lambda: threading.Thread(target=self._run_backup, daemon=True).start()
-                      ).grid(row=0, column=1, padx=10, pady=5, sticky="e")
+                      ).grid(row=2, column=0, pady=(8,5), sticky="w")
 
-        # Description sur sa propre ligne, sur toute la largeur (columnspan=2) : avant,
-        # elle partageait la ligne 0 avec le bouton vert, qui la coupait a fort zoom
-        # car column 1 (bouton) n'a pas de weight et prend toute la place qu'il lui faut
-        ctk.CTkLabel(frame, text="Sauvegarde la config active de tous les appareils dans des fichiers horodates",
-                     text_color="gray").grid(row=1, column=0, columnspan=2, sticky="w")
-
-        self._backup_log = ctk.CTkTextbox(frame, font=self._mono_font, state="disabled")
-        self._backup_log.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=10)
+        # wrap="none" -> scrollbar horizontale interne auto quand une ligne deborde (voir _build_push)
+        self._backup_log = ctk.CTkTextbox(frame, font=self._mono_font, wrap="none", state="disabled")
+        self._backup_log.grid(row=3, column=0, sticky="nsew", pady=10)
 
     def _build_scanner(self, frame):
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)
 
+        # Barre du haut en GRILLE (et non pack(side="left")) pour rester responsive.
+        # Chaque champ est sur SA PROPRE LIGNE, a largeur fixe et ancre a gauche
+        # (sticky="w", label en colonne 0, champ en colonne 1) :
+        #  - largeur fixe -> le champ garde une taille normale et NE S'ETIRE PAS sur
+        #    toute la fenetre quand elle est large (regression "champ long af" quand on
+        #    utilisait sticky="ew" + weight) ;
+        #  - un seul couple label+champ par ligne -> ca tient meme en fenetre etroite a
+        #    fort zoom, sans jamais deborder hors ecran (le probleme d'origine venait
+        #    d'avoir subnet + ports + bouton + checkbox tous sur une meme ligne packee).
+        # Le bouton Scanner + la checkbox -Pn sont sur leur propre ligne (row 2).
         top = ctk.CTkFrame(frame, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", pady=5)
-        ctk.CTkLabel(top, text="Sous-reseau :").pack(side="left", padx=5)
-        self._subnet_entry = ctk.CTkEntry(top, placeholder_text="192.168.1.0/24", width=160)
-        self._subnet_entry.pack(side="left", padx=5)
+        ctk.CTkLabel(top, text="Sous-reseau :").grid(row=0, column=0, padx=(5, 8), pady=(0, 6), sticky="w")
+        self._subnet_entry = ctk.CTkEntry(top, placeholder_text="192.168.1.0/24", width=200)
+        self._subnet_entry.grid(row=0, column=1, pady=(0, 6), sticky="w")
         # Ports optionnels : vide = DEFAULT_SCAN_PORTS. Accepte la syntaxe Nmap
         # (ex "22,23,80" ou "1-1024"). Le placeholder montre la valeur par defaut.
-        ctk.CTkLabel(top, text="Ports :").pack(side="left", padx=(12, 5))
-        self._ports_entry = ctk.CTkEntry(top, placeholder_text=DEFAULT_SCAN_PORTS, width=180)
-        self._ports_entry.pack(side="left", padx=5)
-        # Largeur fixe : le texte passe de "Scanner" a "Scan en cours..." pendant le
-        # scan ; sans largeur fixe, le retrecissement laisse un contour fantome sur
-        # Windows (meme raison que le bouton d'envoi, voir _build_push).
-        self._scan_btn = ctk.CTkButton(top, text="Scanner", width=130,
+        ctk.CTkLabel(top, text="Ports :").grid(row=1, column=0, padx=(5, 8), pady=(0, 6), sticky="w")
+        self._ports_entry = ctk.CTkEntry(top, placeholder_text=DEFAULT_SCAN_PORTS, width=260)
+        self._ports_entry.grid(row=1, column=1, pady=(0, 6), sticky="w")
+        # Bouton + checkbox sur leur propre ligne (leur propre sous-frame packe a gauche) :
+        # ils gardent leur taille naturelle sans jamais deborder, quelle que soit la
+        # largeur de la fenetre.
+        controls = ctk.CTkFrame(top, fg_color="transparent")
+        controls.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        # Largeur fixe du bouton : le texte passe de "Scanner" a "Arreter le scan"
+        # pendant le scan ; sans largeur fixe, le retrecissement laisse un contour
+        # fantome sur Windows (meme raison que le bouton d'envoi, voir _build_push).
+        self._scan_btn = ctk.CTkButton(controls, text="Scanner", width=130,
                                        fg_color="#dc2626", hover_color="#b91c1c",
                                        command=self._start_scan)
-        self._scan_btn.pack(side="left", padx=5)
+        self._scan_btn.pack(side="left", padx=(5, 10))
         # -Pn : saute la decouverte d'hote et scanne directement les ports. A cocher
         # quand un hote (ex routeur GNS3) repond au ping mais est ignore par la
         # decouverte Nmap par defaut (voir _run_nmap_scan).
         self._pn_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(top, text="Sans decouverte (-Pn)", variable=self._pn_var).pack(side="left", padx=10)
+        ctk.CTkCheckBox(controls, text="Sans decouverte (-Pn)", variable=self._pn_var).pack(side="left")
 
         # Log de scan + historique dans un PanedWindow : le sash se tire a la souris
         # pour agrandir/reduire chaque zone, au lieu d'un partage fixe qui laisse soit
@@ -571,7 +617,9 @@ class App(ctk.CTk):
                                         bg=theme_color(PANED_BG), bd=0, opaqueresize=False)
         self._scan_paned.grid(row=1, column=0, sticky="nsew", pady=(5,0))
 
-        self._scan_log = ctk.CTkTextbox(self._scan_paned, font=self._mono_font,
+        # wrap="none" -> scrollbar horizontale interne auto : les longues lignes de
+        # resultat Nmap (services + versions + OS) restent lisibles en scrollant (voir _build_push)
+        self._scan_log = ctk.CTkTextbox(self._scan_paned, font=self._mono_font, wrap="none",
                                          state="disabled", bg_color=PANED_BG)
         self._scan_paned.add(self._scan_log, minsize=60, height=200)
 
@@ -588,6 +636,59 @@ class App(ctk.CTk):
         self._history_frame.grid_columnconfigure(0, weight=1)
         self._scan_paned.add(history_pane, minsize=100, height=250)
         self._load_history_ui()
+        self._install_history_resize_debounce()
+
+    def _install_history_resize_debounce(self):
+        # PERF : le CTkScrollableFrame de l'historique re-ajuste la largeur de son
+        # contenu interne (via _fit_frame_dimensions_to_canvas, branche sur le
+        # <Configure> de son canvas) A CHAQUE evenement de redimensionnement. Avec un
+        # historique fourni, ca reflow toutes les lignes a chaque pixel de drag et
+        # rendait l'onglet Scanner ~3x plus lent que les autres (mesure : ~160 ms vs
+        # ~50 ms par evenement de resize). On "debounce" : pendant un drag continu on
+        # debranche ce fit, et on ne le rebranche (avec un unique recalage largeur +
+        # scrollregion) qu'une fois la taille stabilisee (~160 ms sans nouvel evenement).
+        # -> resize fluide (~25 ms/evenement) et layout correct au repos.
+        # Acces a des attributs internes de CustomTkinter (version epinglee 5.2.2) :
+        # si l'implementation change, on degrade proprement (pas de debounce, aucun
+        # impact fonctionnel) plutot que de planter.
+        try:
+            self._history_canvas = self._history_frame._parent_canvas
+            self._history_fit = self._history_frame._fit_frame_dimensions_to_canvas
+        except AttributeError:
+            return
+        self._history_fit_bound = True
+        self._resize_after = None
+        self._last_size = (self.winfo_width(), self.winfo_height())
+        self.bind("<Configure>", self._on_window_configure, add="+")
+
+    def _on_window_configure(self, event):
+        # Ne reagit qu'au redimensionnement de la fenetre principale (pas aux
+        # <Configure> d'autres widgets, ni aux simples deplacements de fenetre qui
+        # emettent aussi un <Configure> mais ne changent pas la taille).
+        if event.widget is not self:
+            return
+        size = (event.width, event.height)
+        if size == self._last_size:
+            return
+        self._last_size = size
+        if self._history_fit_bound:
+            # Coupe le fit couteux pour toute la duree du drag
+            self._history_canvas.unbind("<Configure>")
+            self._history_fit_bound = False
+        if self._resize_after is not None:
+            self.after_cancel(self._resize_after)
+        self._resize_after = self.after(160, self._resize_settled)
+
+    def _resize_settled(self):
+        # Fin du drag : on rebranche le fit et on applique UN seul recalage largeur +
+        # scrollregion, maintenant que la taille finale est connue.
+        self._resize_after = None
+        if not self._history_canvas.winfo_exists():
+            return
+        self._history_canvas.bind("<Configure>", self._history_fit)
+        self._history_fit_bound = True
+        self._history_fit(None)
+        self._history_canvas.configure(scrollregion=self._history_canvas.bbox("all"))
 
     def _load_history_ui(self):
         # Reconstruit l'affichage de l'historique depuis le JSON (repart de zero a chaque appel)
