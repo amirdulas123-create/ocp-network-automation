@@ -127,6 +127,23 @@ identification correcte du routeur (Huawei, Linux embarque, 96% de confiance).
 
 ![v1.2 Scan Nmap](docs/screenshots/screenshot_v12_scan.png)
 ![v1.2 Arret scan](docs/screenshots/screenshot_v12_stop.png)
+
+### v1.3 — 13 juillet 2026 — Reporting CSV
+
+Generation automatique d'un rapport CSV recapitulatif apres chaque operation
+(push config, backup, scan reseau), exploitable directement dans Excel.
+
+- Un fichier horodate par execution (reports/config_..., backup_..., scan_...)
+- Une ligne par appareil/resultat : date, appareil, operation, statut, detail
+- Encodage UTF-8 avec BOM pour un affichage correct des accents dans Excel
+- Rapport non genere si l'operation n'a produit aucune ligne (pas de fichier vide)
+- Chemin du rapport affiche dans le log de l'app a la fin de chaque operation
+
+Teste en conditions reelles sur le reseau OCP (Jorf Lasfar) : rapports de
+config (Sw1/R2/R3) et de scan (192.168.56.0/24) generes et verifies.
+
+![v1.3 Rapport config](docs/screenshots/screenshot_v13_report.png)
+![v1.3 Rapport scan](docs/screenshots/screenshot_v13_report2.png)
 ---
 
 ## Installation

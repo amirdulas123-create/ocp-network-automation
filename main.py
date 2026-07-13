@@ -1,6 +1,7 @@
 import customtkinter as ctk          # Framework GUI (Tkinter stylise, dark/light mode)
 import threading                     # Pour lancer les taches reseau sans geler l'UI
 import os
+import csv                           # Rapports CSV recapitulatifs (module stdlib, s'ouvre dans Excel)
 import json
 import re                            # Parsing des warnings/erreurs remontes par nmap
 import time                          # Chronometrage du scan (temps total)
@@ -19,6 +20,8 @@ from tkinter import filedialog, PanedWindow  # Boite de dialogue "Parcourir un f
 HISTORY_FILE = os.path.join("data", "scan_history.json")   # Historique des scans reseau
 SETTINGS_FILE = os.path.join("data", "settings.json")      # Preferences (theme dark/light)
 COMMANDS_FILE = "commands.txt"                              # Commandes par defaut si la zone de texte est vide
+REPORTS_DIR = "reports"                                     # Rapports CSV (un fichier par execution)
+REPORT_HEADER = ["Date", "Appareil", "Operation", "Statut", "Detail"]
 # Tuples (mode clair, mode sombre) explicites pour tout ce qui vit dans un PanedWindow :
 # un PanedWindow est un widget Tk brut, donc la detection automatique de couleur de
 # CustomTkinter ("transparent", coins arrondis) s'y resout UNE seule fois au demarrage
@@ -74,8 +77,8 @@ class ScanCancelled(Exception):
     # Levee quand l'utilisateur demande l'arret du scan (bouton "Arreter le scan").
     # Remonte jusqu'a _run_scan_inner qui l'affiche proprement au lieu d'un "Erreur".
     pass
-
-
+    # Case décochée = Nmap teste d'abord qui existe, puis scanne que ceux-là (plus rapide)
+    # Case cochée = Nmap scanne tout le monde direct, sans vérifier avant (plus lent mais rate personne)
 def scan_network(subnet, cancel=None):
     # Ping tous les hotes d'un sous-reseau en parallele (50 threads), puis detecte
     # le type de chaque appareil qui repond. cancel (threading.Event) permet d'arreter
@@ -336,6 +339,33 @@ def save_settings(settings):
     os.makedirs("data", exist_ok=True)
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=2)
+
+def report_row(appareil, operation, statut, detail):
+    # Une ligne de rapport : Date,Appareil,Operation,Statut,Detail. Le detail est
+    # aplati sur UNE seule ligne (les erreurs Netmiko et les sorties de switch sont
+    # souvent multi-lignes) : sinon le module csv les entoure de guillemets et Excel
+    # affiche une cellule qui deborde sur plusieurs lignes, illisible dans un tableau.
+    detail = " ".join(str(detail).split())
+    return [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), appareil, operation, statut, detail]
+
+def save_report(prefix, rows):
+    # Ecrit le recapitulatif d'une execution dans reports/<prefix>_<date>_<heure>.csv
+    # et renvoie son chemin (None si l'operation n'a produit aucune ligne : rien a
+    # rapporter, on ne cree pas de fichier vide).
+    if not rows:
+        return None
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    path = os.path.join(REPORTS_DIR, f"{prefix}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv")
+    # newline="" : impose par le module csv, sinon Windows ajoute un \r en trop et le
+    # fichier contient une ligne vide sur deux.
+    # utf-8-sig = UTF-8 + BOM : c'est le BOM qui fait qu'Excel reconnait l'UTF-8 au
+    # lieu de retomber sur l'encodage local (sans lui, "Equipement rejete" et les
+    # accents des messages d'erreur s'affichent en "Ã©" dans les cellules).
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(REPORT_HEADER)
+        writer.writerows(rows)
+    return path
 
 def theme_color(color_tuple):
     # tkinter.PanedWindow est un widget Tk brut (pas CustomTkinter) : il ne comprend
@@ -766,10 +796,16 @@ class App(ctk.CTk):
             alive = scan_network_smart(subnet, lambda m: self._log(box, m),
                                        ports=ports, skip_discovery=skip_discovery,
                                        cancel=self._scan_cancel)
+            rows = []  # lignes du rapport CSV, une par hote trouve
             for ip, device_type in alive:
                 self._log(box, f"✓ {ip} — {device_type}")
+                # device_type contient deja le detail complet construit par Nmap
+                # (type d'equipement + services/versions + OS), ou le simple type
+                # d'equipement si on est retombe sur le scan basique.
+                rows.append(report_row(ip, "Scan", "Actif", device_type))
             self._log(box, f"\nTotal: {len(alive)} hotes actifs")
             self._log(box, f"Temps total du scan : {time.perf_counter() - t0:.1f}s")
+            self._save_report(box, "scan", rows)
             # Retire l'ancienne entree du meme sous-reseau, la remet en tete avec la date du jour
             history = load_history()
             history = [h for h in history if h["target"] != subnet]
@@ -832,6 +868,7 @@ class App(ctk.CTk):
             return
 
         self._log(box, f"Commandes a envoyer: {len(commands)}")
+        rows = []  # lignes du rapport CSV, une par appareil traite
         for d in devices:
             # Verifie AVANT chaque appareil si l'utilisateur a demande l'arret (bouton
             # "Arreter l'envoi"). On ne peut pas interrompre une connexion SSH deja en
@@ -839,7 +876,7 @@ class App(ctk.CTk):
             # sur les appareils suivants.
             if self._push_cancel.is_set():
                 self._log(box, "Envoi arrete par l'utilisateur")
-                return
+                break  # (et non return) : les appareils deja traites restent rapportes
             self._log(box, f"Connexion a {d['name']}...")
             try:
                 conn = ConnectHandler(
@@ -869,11 +906,17 @@ class App(ctk.CTk):
                     self._log(box, f"⚠ {d['name']} — commande(s) rejetee(s) par le switch:")
                     for line in errors_found:
                         self._log(box, f"   {line.strip()}")
+                    rows.append(report_row(d["name"], "Config", "Commande rejetee",
+                                           " | ".join(line.strip() for line in errors_found)))
                 else:
                     self._log(box, f"✓ {d['name']} — config appliquee")
+                    rows.append(report_row(d["name"], "Config", "Succes", " | ".join(commands)))
             except Exception as e:
                 # Continue sur les appareils suivants meme si celui-ci echoue
                 self._log(box, f"✗ {d['name']} — {e}")
+                rows.append(report_row(d["name"], "Config", "Echec", e))
+
+        self._save_report(box, "config", rows)
 
     def _run_backup(self):
         # Recupere show running-config de chaque appareil et le sauvegarde dans un fichier horodate
@@ -884,6 +927,7 @@ class App(ctk.CTk):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         backup_dir = os.path.join("backups", timestamp)  # un dossier par session de sauvegarde
         os.makedirs(backup_dir, exist_ok=True)
+        rows = []  # lignes du rapport CSV, une par appareil
         for d in devices:
             self._log(box, f"Connexion a {d['name']}...")
             try:
@@ -905,8 +949,26 @@ class App(ctk.CTk):
                 with open(filename, "w") as f:
                     f.write(output)
                 self._log(box, f"✓ {d['name']} — sauvegarde: {filename}")
+                rows.append(report_row(d["name"], "Backup", "Succes", filename))
             except Exception as e:
                 self._log(box, f"✗ {d['name']} — {e}")
+                rows.append(report_row(d["name"], "Backup", "Echec", e))
+
+        self._save_report(box, "backup", rows)
+
+    def _save_report(self, box, prefix, rows):
+        # Ecrit le CSV de l'operation qui vient de se terminer et annonce son chemin
+        # dans le log de l'onglet : le log de l'UI disparait a la fermeture de l'app,
+        # le rapport est ce qui reste. Un souci d'ecriture (dossier en lecture seule,
+        # fichier ouvert dans Excel) est signale mais n'invalide pas l'operation, qui
+        # elle a bien eu lieu -> on log l'erreur au lieu de la laisser remonter.
+        try:
+            path = save_report(prefix, rows)
+        except OSError as e:
+            self._log(box, f"Rapport non genere : {e}")
+            return
+        if path:
+            self._log(box, f"Rapport genere : {path}")
 
     def _log(self, box, msg):
         # _run_push_inner/_run_backup/_run_scan tournent dans des threads en arriere-
