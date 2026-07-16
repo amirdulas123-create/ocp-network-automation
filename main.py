@@ -364,24 +364,28 @@ def _best_os_match(host_info):
 def _format_nmap_host(host_info):
     # Construit la ligne de details d'un hote a partir des donnees Nmap, dans le
     # meme esprit que detect_device() mais enrichi : type d'equipement, services
-    # avec produit/version (ex "SSH: OpenSSH 8.2"), et OS si disponible.
+    # avec produit/version (ex "SSH: OpenSSH 8.2"), OS si disponible, ET le detail
+    # des vulnerabilites remontees par les scripts NSE (partie UDP).
+    #
+    # IMPORTANT (regression v1.5) : cette chaine est la SEULE source du champ "Detail"
+    # du rapport CSV (found -> _run_scan_inner -> report_row -> save_report). Elle doit
+    # donc contenir TOUT ce qui est montre a l'utilisateur dans le log, y compris la
+    # SORTIE des scripts de vuln — pas seulement leur identifiant. Avant ce correctif,
+    # on n'y mettait que l'id compact ("161/snmp-info") : le detail des vulnerabilites
+    # (communaute SNMP, version IOS, uptime...) restait uniquement dans le log de l'UI
+    # et n'apparaissait jamais dans le CSV d'un scan UDP -> rapport incomplet.
     services = []
     open_ports = []
-    vuln_ids = []   # scripts NSE ayant produit une sortie (vuln potentielle)
     # TCP puis UDP (si un scan -sU a tourne). all_udp() existe dans python-nmap et
     # renvoie [] quand aucun port UDP n'a ete scanne, donc l'appel est sans risque.
     for proto in ("tcp", "udp"):
         all_ports = host_info.all_tcp() if proto == "tcp" else host_info.all_udp()
         for port in all_ports:
             pdata = host_info[proto][port]
-            state = pdata.get("state")
-            # Scripts NSE : on les remonte MEME si l'etat est "open|filtered" (frequent
-            # en UDP), sinon on raterait une trouvaille de vuln sur un port non "open".
-            for sid in (pdata.get("script") or {}):
-                vuln_ids.append(f"{port}/{sid}")
             # En UDP, Nmap conclut souvent "open|filtered" (absence de reponse) : on
             # ne retient que les ports reellement "open" pour la liste des services.
-            if state != "open":
+            # (Les scripts NSE, eux, sont recuperes plus bas MEME sur "open|filtered".)
+            if pdata.get("state") != "open":
                 continue
             open_ports.append(port)
             label = PORT_LABELS.get(port, pdata.get("name") or str(port))
@@ -399,8 +403,16 @@ def _format_nmap_host(host_info):
     os_label = _best_os_match(host_info)
     if os_label:
         detail += f" | OS: {os_label}"
-    if vuln_ids:
-        detail += " | ⚠ Vuln: " + ", ".join(sorted(set(vuln_ids)))
+    # Detail COMPLET des vulnerabilites (script + sortie compacte), pas seulement l'id :
+    # _host_script_findings remonte MEME les scripts sur un port "open|filtered" (frequent
+    # en UDP), donc une vuln n'est jamais perdue. report_row aplatit ensuite les retours a
+    # la ligne et csv.writer echappe les deux-points/pipes/guillemets/virgules : le CSV
+    # reste bien forme meme avec une sortie snmp-info/ntp-info verbeuse.
+    findings = _host_script_findings(host_info)
+    if findings:
+        detail += " | ⚠ Vuln: " + "; ".join(
+            f"{port_label} {sid}" + (f": {summary}" if summary else "")
+            for port_label, sid, summary in findings)
     return detail
 
 def _shorten_script_output(output, limit=200):
