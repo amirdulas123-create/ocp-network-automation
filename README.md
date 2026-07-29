@@ -210,6 +210,145 @@ serveur HTTP expose).
 ![v1.5 Detection vuln](docs/screenshots/screenshot_v15_vuln.png)
 ![v1.5 Scan complet](docs/screenshots/screenshot_v15_Scan.png)
 
+### v1.6 — 29 juillet 2026 — Laboratoire d'infrastructure GNS3 complet (20 jours de travail)
+
+Jusqu'ici, l'application avait ete testee sur un nombre limite d'equipements
+(Sw1, R2/R3, un switch Catalyst reel isole). Les 20 derniers jours ont ete
+consacres a construire, dans GNS3, un laboratoire complet et realiste :
+plusieurs sites relies par un vrai routage, un firewall reel avec une DMZ,
+des serveurs reels rendant de vrais services, et un acces SSH verifie sur
+l'ensemble des equipements. Ce travail ne touche pas au code de
+l'application elle-meme, mais fournit desormais un environnement de test
+bien plus proche d'un vrai reseau d'entreprise que les quelques appareils
+isoles utilises jusqu'a v1.5.
+
+**Topologie reseau (siege + 2 succursales)**
+
+- Modele hierarchique a 3 niveaux : Core (CORE-HQ) → Distribution (DIST-HQ1,
+  DIST-HQ2, DIST-BR1, DIST-BR2) → Acces (ACC-SW-HQ1 + postes/serveurs)
+- OSPF (aire 0) sur l'ensemble du reseau, y compris les liens WAN vers les
+  2 succursales — toutes les adjacences verifiees FULL
+- Lien redondant DIST-HQ1 ↔ DIST-HQ2 : le siege reste operationnel meme si
+  CORE-HQ tombe en panne
+- 6 departements repartis sur 3 sites (IT, RH, Finance, Commercial,
+  Direction, Production, Logistique)
+
+**Serveurs reels, un par departement**
+
+Chaque serveur ci-dessous n'est pas une simulation : c'est une vraie machine
+Alpine Linux installee sur disque virtuel (pas juste demarree depuis l'ISO),
+faisant tourner un vrai logiciel de serveur, verifie fonctionnel — y compris
+apres redemarrage de la machine.
+
+- **SRV-WEB** (Dept IT, place en DMZ) — Apache 2.4, sert une vraie page HTML,
+  accessible depuis l'exterieur du reseau sur le port 80 uniquement (voir
+  section Securite ci-dessous)
+- **SRV-FTP** (Dept RH) — OpenSSH avec SFTP, compte `ftpuser` dedie, acces
+  fichiers securise par SSH plutot que du FTP en clair
+- **SRV-DNS** (Dept Finance) — dnsmasq, resout de vrais noms de domaine
+  internes (`srv-web.ocp-lab.local`, etc.) vers les IP du laboratoire
+- **SRV-INTRANET** (Succursale 1, Dept Commercial) — nginx, sert une page
+  intranet
+- **SRV-SYSLOG** (Succursale 2, Dept Production) — rsyslog, ecoute et
+  reçoit de vrais messages syslog distants (UDP/TCP port 514), verifie avec
+  un message de test recu et correctement horodate/classe
+
+**Securite perimetrique**
+
+- Pare-feu reel (Shorewall, sur Alpine Linux) avec politique de zones
+  net/loc/dmz et refus par defaut (default-deny)
+- DMZ fonctionnelle : SRV-WEB est isole sur sa propre interface reseau
+  dediee du pare-feu, avec une seule regle explicite autorisant le port 80
+  depuis l'exterieur — tout le reste reste bloque
+- Un poste "client externe" dedie (EXT-CLIENT), place hors du pare-feu,
+  demontre concretement le comportement reel : acces au port 80 de SRV-WEB
+  reussi, ping vers le reseau interne bloque, tentative de connexion SSH
+  vers SRV-WEB bloquee — les 3 tests verifies dans une seule session
+- Une ACL departementale demontre la segmentation de securite au niveau
+  routeur (pas seulement les VLAN) : le departement Finance ne peut pas
+  acceder au serveur FTP du departement RH, alors que l'acces Internet et
+  l'acces depuis les autres departements restent fonctionnels — teste dans
+  les deux sens pour confirmer que la regle est precise et non un blocage
+  general
+
+**Acces administrateur reel**
+
+- Un hote relais (jump host) Alpine Linux, avec adressage NAT et
+  redirection de routes, permet a un vrai poste Windows d'acceder au
+  laboratoire — le meme chemin que celui qu'empruntera l'application en
+  conditions reelles
+- SSH configure et verifie sur les 7 routeurs et le switch d'acces
+  (authentification locale, cles RSA, `transport input ssh` — telnet
+  desactive), avec adressage de boucle de loopback prive (`10.255.255.0/24`)
+
+**Difficultes rencontrees et comment elles ont ete resolues**
+
+- *Adresses IP en conflit avec de vraies adresses Internet* — les premieres
+  boucles de loopback des routeurs (1.1.1.1, etc.) coincidaient avec de
+  vraies adresses publiques existantes (ex. le DNS public de Cloudflare).
+  Resultat : certains tests de connectivite semblaient reussir alors qu'ils
+  contactaient en realite un vrai serveur sur Internet, pas le routeur du
+  laboratoire. Corrige en renumerotant toutes les boucles de loopback dans
+  une plage strictement privee (`10.255.255.0/24`).
+- *Blocage de gros paquets (MTU/fragmentation)* — les telechargements de
+  paquets et certaines connexions plus lourdes echouaient silencieusement
+  sur les chemins reseau les plus longs (plusieurs sauts de routeurs),
+  alors que les simples ping fonctionnaient. Diagnostique comme un probleme
+  classique de MTU/PMTU sur un reseau multi-sauts ; corrige en activant
+  `CLAMPMSS=Yes` sur le pare-feu, qui ajuste automatiquement la taille des
+  paquets TCP a la taille maximale supportee par le chemin.
+- *Machines virtuelles perdant leur configuration a chaque redemarrage* —
+  le probleme le plus long a resoudre. Plusieurs machines Alpine (le jump
+  host, le pare-feu, les serveurs) demarraient en mode "live" depuis leur
+  CD d'installation plutot que d'etre reellement installees sur un disque
+  virtuel : tout fonctionnait parfaitement tant que la machine restait
+  allumee, mais un redemarrage effaçait entierement la configuration.
+  Resolu en installant proprement chaque machine sur son propre disque
+  virtuel (partitionnement, systeme de fichiers, copie du systeme,
+  installation du chargeur de demarrage), avec verification systematique
+  que la configuration survit reellement a un redemarrage complet.
+- *Un serveur refusant de demarrer depuis son disque malgre une
+  installation identique aux autres* — un des serveurs (SRV-FTP) affichait
+  systematiquement une erreur de demarrage ("Failed to load ldlinux.c32")
+  meme apres plusieurs re-installations completes et identiques a celles
+  qui avaient fonctionne sur les autres serveurs. La cause exacte n'a jamais
+  ete identifiee avec certitude (probable corruption interne du fichier
+  disque virtuel suite a des arrets forces repetes). Contourne efficacement
+  en clonant integralement un serveur deja fonctionnel (disque + configuration
+  materielle complete de la machine virtuelle) puis en reconfigurant son
+  contenu (nom, adresse IP, service) — solution plus rapide et fiable que de
+  continuer a deboguer un cas isole, et reutilisee ensuite pour creer
+  rapidement les serveurs suivants.
+- *Conflits d'identifiant de routeur OSPF* — plusieurs routeurs se
+  retrouvaient reguliererement avec le meme identifiant OSPF (router-id)
+  qu'un autre routeur du reseau, ce qui empechait leurs voisins de se
+  former correctement. Corrige en forçant explicitement un identifiant
+  unique sur chaque routeur concerne et en reinitialisant le processus OSPF
+  pour appliquer le changement immediatement.
+- *Identifiants reels commis dans le depot Git* — `devices.xlsx`, contenant
+  de vrais identifiants de connexion utilises pour les tests, avait ete
+  commis dans l'historique Git malgre une regle `.gitignore` — celle-ci
+  n'empeche que le suivi de nouveaux fichiers, pas le retrait d'un fichier
+  deja suivi avant son ajout au `.gitignore`. Corrige en retirant le fichier
+  du suivi Git et en le remplaçant par `devices.xlsx.example`, avec des
+  valeurs fictives.
+
+Ce laboratoire sert desormais de base de test réel pour la nouvelle
+fonctionnalite "Connexion" (voir section suivante) : connexion SSH multiple,
+decouverte de topologie via CDP, et visualisation graphique interactive du
+reseau.
+
+![v1.6 Topologie GNS3](docs/screenshots/screenshot_v16_topologie.png)
+![v1.6 Firewall Shorewall](docs/screenshots/screenshot_v16_firewall.png)
+![v1.6 Test DMZ client externe](docs/screenshots/screenshot_v16_dmz_test.png)
+![v1.6 SSH tous equipements](docs/screenshots/screenshot_v16_ssh.png)
+![v1.6 Serveur Apache SRV-WEB](docs/screenshots/screenshot_v16_srvweb.png)
+![v1.6 SFTP SRV-FTP](docs/screenshots/screenshot_v16_srvftp.png)
+![v1.6 DNS SRV-DNS](docs/screenshots/screenshot_v16_srvdns.png)
+![v1.6 Intranet nginx](docs/screenshots/screenshot_v16_srvintranet.png)
+![v1.6 Syslog reçu](docs/screenshots/screenshot_v16_syslog.png)
+![v1.6 ACL Finance bloquee](docs/screenshots/screenshot_v16_acl.png)
+
 ---
 
 ## Installation
